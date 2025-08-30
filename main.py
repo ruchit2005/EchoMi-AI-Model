@@ -5,10 +5,14 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import json
 import re
+import uuid
+import time
 from geopy.distance import geodesic
 
 app = Flask(__name__)
 load_dotenv()
+
+BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
 
 # --- CONFIGURATION ---
 USER_LOCATION = {
@@ -16,6 +20,18 @@ USER_LOCATION = {
     "lng": float(os.getenv("USER_LNG", 77.6359444711491))
 }
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+APP_SECRET_KEY = os.getenv("APP_SECRET_KEY")
+NODEJS_BACKEND_URL = os.getenv("NODEJS_BACKEND_URL", "http://localhost:3000")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
+OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
+
+print(f"✅ Loaded APP_SECRET_KEY: '{APP_SECRET_KEY}'")
+print(f"✅ Node.js Backend URL: {NODEJS_BACKEND_URL}")
+print(f"✅ Internal API Key configured: {'Yes' if INTERNAL_API_KEY else 'No'}")
+
+# --- SECURE ORDER WALLET ---
+# The key is a unique order_id. The value is a dictionary of order details.
+ORDER_WALLET = {}
 
 # --- OPENAI CLIENT ---
 try:
@@ -27,6 +43,56 @@ except Exception as e:
     exit(1)
 
 # --- HELPER FUNCTIONS ---
+
+def send_push_notification(phone_number: str, message: str, approval_token: str):
+    """Send push notification to Android app via Node.js backend"""
+    try:
+        notification_endpoint = f"{NODEJS_BACKEND_URL}/api/send-notification"
+        
+        payload = {
+            "user_phone": phone_number,
+            "title": "Delivery Verification Required",
+            "message": message,
+            "type": "delivery_approval",
+            "approval_token": approval_token,
+            "action_required": True,
+            "timestamp": int(time.time())
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {INTERNAL_API_KEY}",
+            "User-Agent": "DeliveryBot/1.0"
+        }
+        
+        print(f"📱 [NOTIFICATION] Sending to Node.js: {notification_endpoint}")
+        print(f"📱 [NOTIFICATION] Payload: {payload}")
+        
+        response = requests.post(
+            notification_endpoint, 
+            json=payload, 
+            headers=headers, 
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ [NOTIFICATION] Push notification sent successfully: {result}")
+            return True
+        else:
+            print(f"❌ [NOTIFICATION] Failed: {response.status_code} - {response.text}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        print("❌ [NOTIFICATION] Timeout connecting to Node.js backend")
+        return False
+    except requests.exceptions.ConnectionError:
+        print("❌ [NOTIFICATION] Cannot connect to Node.js backend")
+        return False
+    except Exception as e:
+        print(f"❌ [NOTIFICATION] Unexpected error: {e}")
+        return False
+
 def clean_location_text(raw_text: str) -> str:
     """Removes filler words from a spoken location for better geocoding."""
     cleaned = raw_text.lower()
@@ -48,6 +114,7 @@ def detect_user_intent(message: str):
     message_lower = message.lower().strip()
     message_cleaned = re.sub(r'[.!?]', '', message_lower)
     if any(k in message_lower for k in ["road", "nagar", "colony", "market", "station", "gate", "circle", "apartment", "complex", "mall", "near", "opposite", "metro", "bus stop"]): return "providing_location"
+    if any(k in message_lower for k in ['otp', 'one time password', 'code']): return "requesting_otp"
     if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart"]): return "initial_delivery"
     if any(k in message_lower for k in ["it's fine", "it's ok", 'ask him to call', 'just call me back']): return "non_urgent_callback"
     if any(k in message_lower for k in ['same number', 'this number', "number i'm calling from"]): return "provide_self_number"
@@ -95,14 +162,13 @@ Examples:
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.1,  # Lower temperature for more consistent extraction
+            temperature=0.1,
             max_tokens=150
         )
         
         extracted = json.loads(response.choices[0].message.content.strip())
         print(f"✅ [INFO EXTRACTION] Extracted: {extracted}")
         
-        # Clean up phone number if present
         if extracted.get("phone"):
             formatted = format_phone_number(extracted["phone"])
             if formatted: 
@@ -110,7 +176,6 @@ Examples:
             else: 
                 del extracted["phone"]
         
-        # Clean up company name if present
         if extracted.get("company"):
             extracted["company"] = extracted["company"].strip().title()
             
@@ -318,7 +383,7 @@ def get_estimated_arrival_time(origin_coords):
         print(f"❌ Travel time estimation error: {e}")
         return None
     
-    # --- UNKNOWN CALLER LOGIC ---
+# --- UNKNOWN CALLER LOGIC ---
 def handle_unknown_logic(message: str, stage: str, collected_info: dict, caller_id=None):
     """Handle conversation flow for unknown callers"""
     if any(k in message.lower() for k in ['urgent', 'asap', 'emergency']):
@@ -364,97 +429,204 @@ def handle_unknown_logic(message: str, stage: str, collected_info: dict, caller_
 
     return "Thank you. I'll make sure Ruchit gets the message.", "end_of_call", collected_info, action
 
-# --- DELIVERY LOGIC (OPTIMIZED) ---
-# --- DELIVERY LOGIC (MODIFIED TO BE MORE DECISIVE) ---
-# --- DELIVERY LOGIC (WITH PROACTIVE COMPANY EXTRACTION) ---
-# --- DELIVERY LOGIC (FINAL, MORE ROBUST VERSION) ---
-# --- DELIVERY LOGIC (FINAL, WITH DEBUG LOGGING) ---
-def handle_delivery_logic(message: str, stage: str, collected_info: dict):
-    """Handles the delivery flow with robust logging to debug proactive extraction."""
+# --- DELIVERY LOGIC ---
+def handle_delivery_logic(message: str, stage: str, collected_info: dict, caller_id=None):
+    """
+    Handles delivery verification with two notification scenarios:
+    Case 1: Delivery person doesn't have tracking ID
+    Case 2: OTP message from company doesn't contain tracking ID
+    """
     intent = detect_user_intent(message)
     action = {}
     print(f"\n--- [DELIVERY LOGIC] START ---")
     print(f"--- [DELIVERY LOGIC] Stage: {stage}, Intent: {intent} ---")
+    print(f"--- [DELIVERY LOGIC] Message: '{message}' ---")
     print(f"--- [DELIVERY LOGIC] Current collected_info: {collected_info} ---")
 
-    # Stage 1: Handle the very first turn of a delivery call
-    if stage == "start" and intent == "initial_delivery":
-        print("--- [DELIVERY LOGIC] In Stage 1: 'start' with initial_delivery intent ---")
-        
-        # Extract information from the message
-        extracted_info = extract_information_with_openai(message, collected_info)
-        print(f"--- [DELIVERY LOGIC] Raw extracted_info: {extracted_info} ---")
-        
-        # Update collected_info with extracted information
-        collected_info.update(extracted_info)
-        print(f"--- [DELIVERY LOGIC] Updated collected_info: {collected_info} ---")
-        
+    # Handle OTP requests at any stage
+    if intent == "requesting_otp":
         company = collected_info.get("company")
-        print(f"--- [DELIVERY LOGIC] Final company value: '{company}' ---")
+        if not company:
+            return "To get an OTP, please first tell me which company you are from.", "asked_for_company", collected_info, action
 
-        if company:
-            print(f"--- [DELIVERY LOGIC] Company found: '{company}'. Skipping company question. ---")
-            response_text = f"Got it, a delivery from {company}. Do you need directions to reach here?"
-            new_stage = "asked_for_directions"
-            print(f"--- [DELIVERY LOGIC] Returning: '{response_text}' with stage '{new_stage}' ---")
-            return response_text, new_stage, collected_info, action
+        # Find the order for the company
+        order_id, order_data = None, None
+        for id, data in ORDER_WALLET.items():
+            if data.get("company") == company and data.get("status") == "pending":
+                order_id, order_data = id, data
+                break
+        
+        if not order_data:
+            return f"I don't have a pending order from {company} that needs an OTP.", "end_of_call", collected_info, action
+
+        collected_info['order_id'] = order_id
+        
+        # Branch to the correct verification method
+        if order_data.get("tracking_id"):
+            return f"Okay, to get the OTP for {company}, please provide the tracking ID.", "awaiting_tracking_id", collected_info, action
         else:
-            print("--- [DELIVERY LOGIC] No company found. Asking for company. ---")
-            response_text = "Which company is the delivery from?"
-            new_stage = "asked_for_company"
-            return response_text, new_stage, collected_info, action
+            # Push notification for approval
+            approval_token = str(uuid.uuid4())
+            ORDER_WALLET[order_id]['approval_token'] = approval_token
+            
+            if OWNER_PHONE_NUMBER and INTERNAL_API_KEY:
+                notification_sent = send_push_notification(
+                    OWNER_PHONE_NUMBER, 
+                    f"Delivery from {company} requesting OTP. Click to approve or deny.",
+                    approval_token
+                )
+                if notification_sent:
+                    return "I've sent a notification to the owner for approval. Please hold.", "awaiting_approval", collected_info, action
+            
+            # Fallback
+            approval_link = f"{BASE_URL}/approve-order?token={approval_token}"
+            print(f"🔗 [FALLBACK] Web approval link: {approval_link}")
+            return "I need owner approval, but the notification system isn't available.", "end_of_call", collected_info, action
 
-    # Stage 2: Handle the turn after we've asked for the company name
+    # Stage 1: Initial delivery call
+    if stage == "start":
+        print("--- [DELIVERY LOGIC] Processing initial delivery message ---")
+        extracted_info = extract_information_with_openai(message, collected_info)
+        print(f"--- [DELIVERY LOGIC] Extracted info: {extracted_info} ---")
+        
+        collected_info.update(extracted_info)
+        company = collected_info.get("company")
+        print(f"--- [DELIVERY LOGIC] Company: '{company}' ---")
+        
+        if not company:
+            print("--- [DELIVERY LOGIC] No company found, asking for company ---")
+            return "Hi, which company is this delivery from?", "asked_for_company", collected_info, action
+
+        # Find pending order for this company
+        pending_order = next((data for id, data in ORDER_WALLET.items() 
+                            if data.get("company", "").lower() == company.lower() and data.get("status") == "pending"), None)
+
+        if not pending_order:
+            print(f"--- [DELIVERY LOGIC] No pending orders for '{company}' ---")
+            return f"I don't have any pending orders from {company} right now. Please check with the sender.", "end_of_call", collected_info, action
+
+        # Store order ID
+        order_id = next(id for id, data in ORDER_WALLET.items() if data is pending_order)
+        collected_info['order_id'] = order_id
+        print(f"--- [DELIVERY LOGIC] Found pending order: {order_id} ---")
+
+        # Check if OTP message has tracking ID (Case 2)
+        if not pending_order.get("tracking_id"):
+            print("--- [DELIVERY LOGIC] CASE 2: OTP message has no tracking ID - sending notification ---")
+            return send_approval_notification(order_id, company, collected_info)
+        else:
+            print("--- [DELIVERY LOGIC] OTP message has tracking ID - asking delivery person ---")
+            return f"I have an order from {company}. Do you have the tracking ID?", "checking_tracking_availability", collected_info, action
+
+    # Stage 2: Handle company name collection
     if stage == "asked_for_company":
-        print("--- [DELIVERY LOGIC] In Stage 2: 'asked_for_company' ---")
+        print("--- [DELIVERY LOGIC] Processing company name response ---")
         extracted_info = extract_information_with_openai(message, collected_info)
         company = extracted_info.get("company")
         
         if not company:
-            # If OpenAI didn't extract it, treat the whole message as company name
-            company = message.replace('.', '').strip()
+            company = message.replace('.', '').strip().title()
+        
+        collected_info["company"] = company
+        
+        # Find pending order
+        pending_order = next((data for id, data in ORDER_WALLET.items() 
+                            if data.get("company", "").lower() == company.lower() and data.get("status") == "pending"), None)
 
-        collected_info["company"] = company.title()
-        return f"Got it, a delivery from {collected_info['company']}. Do you need directions to reach here?", "asked_for_directions", collected_info, action
+        if not pending_order:
+            return f"I don't have any pending orders from {company} right now.", "end_of_call", collected_info, action
 
-    # Stage 3: Directions need assessment
-    if stage == "asked_for_directions":
-        print("--- [DELIVERY LOGIC] In Stage 3: 'asked_for_directions' ---")
-        if intent == "general_yes":
-            return "Sure. Where are you coming from? Please tell me a landmark or your current area.", "asked_for_location", collected_info, action
-        elif intent == "declining":
-            return "No problem! Please leave the package with the security guard, Kumar, at the main gate. Thank you!", "end_of_call", collected_info, action
+        order_id = next(id for id, data in ORDER_WALLET.items() if data is pending_order)
+        collected_info['order_id'] = order_id
+
+        # Check tracking ID availability
+        if not pending_order.get("tracking_id"):
+            print("--- [DELIVERY LOGIC] CASE 2: OTP message has no tracking ID - sending notification ---")
+            return send_approval_notification(order_id, company, collected_info)
         else:
-            return "Sorry, I didn't get that. Do you need directions? Please say yes or no.", "asked_for_directions", collected_info, action
+            return f"I have an order from {company}. Do you have the tracking ID?", "checking_tracking_availability", collected_info, action
 
-    # Stage 4: Location processing
-    if stage == "asked_for_location":
-        print("--- [DELIVERY LOGIC] In Stage 4: 'asked_for_location' ---")
-        caller_location_text = message.strip()
-        geocoded_results = geocode_with_google(caller_location_text)
+    # Stage 3: Check if delivery person has tracking ID
+    if stage == "checking_tracking_availability":
+        print("--- [DELIVERY LOGIC] Delivery person response about having tracking ID ---")
+        if intent == "general_yes":
+            print("--- [DELIVERY LOGIC] Delivery person has tracking ID - requesting it ---")
+            return "Please provide the tracking ID for verification.", "awaiting_tracking_id", collected_info, action
+        elif intent == "declining":
+            print("--- [DELIVERY LOGIC] CASE 1: Delivery person doesn't have tracking ID - sending notification ---")
+            order_id = collected_info.get('order_id')
+            company = collected_info.get('company')
+            return send_approval_notification(order_id, company, collected_info)
+        else:
+            return "Do you have the tracking ID? Please say yes or no.", "checking_tracking_availability", collected_info, action
 
-        if not geocoded_results:
-            return f"I couldn't find '{caller_location_text}' nearby. Could you please name a specific landmark, main road, or area in Bengaluru?", "asked_for_location", collected_info, action
+    # Stage 4: Verify tracking ID
+    if stage == "awaiting_tracking_id":
+        print("--- [DELIVERY LOGIC] Verifying provided tracking ID ---")
+        provided_tracking_id = message.replace(" ", "").upper()
+        order_id = collected_info.get('order_id')
+        order = ORDER_WALLET.get(order_id)
 
-        location_choice = geocoded_results[0]
-        directions = get_directions_from_google(location_choice)
-        eta = get_estimated_arrival_time(location_choice)
+        if order and order.get("tracking_id") == provided_tracking_id:
+            otp = order.get("otp")
+            company = order.get("company")
+            ORDER_WALLET.pop(order_id, None)
+            print(f"--- [DELIVERY LOGIC] Tracking verified, releasing OTP: {otp} ---")
+            return f"Tracking ID verified. Your OTP is: {otp}. Thank you!", "end_of_call", collected_info, action
+        else:
+            print("--- [DELIVERY LOGIC] Tracking verification failed ---")
+            return "That tracking ID doesn't match. Please check and try again.", "awaiting_tracking_id", collected_info, action
+
+    # Stage 5: Waiting for push notification approval
+    if stage == "awaiting_approval":
+        print("--- [DELIVERY LOGIC] Checking if notification was approved ---")
+        order_id = collected_info.get('order_id')
+        order = ORDER_WALLET.get(order_id)
         
-        response_parts = [f"Okay, from {location_choice['place_name']}:"]
-        if directions: response_parts.append(f"Directions: {directions}.")
-        if eta: response_parts.append(eta)
-        response_parts.append("Please leave the package with Kumar at the main gate. Thank you!")
-        
-        return " ".join(response_parts), "directions_provided", collected_info, action
+        if order and order.get("status") == "approved":
+            otp = order.get("otp")
+            company = order.get("company")
+            ORDER_WALLET.pop(order_id, None)
+            print(f"--- [DELIVERY LOGIC] Notification approved, releasing OTP: {otp} ---")
+            return f"Delivery approved! Your OTP is: {otp}. Thank you!", "end_of_call", collected_info, action
+        elif order and order.get("status") == "denied":
+            ORDER_WALLET.pop(order_id, None)
+            return "The delivery was denied. Please contact the sender.", "end_of_call", collected_info, action
+        else:
+            return "Still waiting for approval. Please hold on.", "awaiting_approval", collected_info, action
 
-    # Stage 5: Conversation ending
+    # Handle conversation ending
     if intent == "ending_conversation":
-        print("--- [DELIVERY LOGIC] In Stage 5: 'ending_conversation' ---")
-        return "You're welcome! Thanks for the delivery and drive safely!", "end_of_call", collected_info, action
+        return "You're welcome! Have a safe delivery!", "end_of_call", collected_info, action
+            
+    # Fallback
+    return "Which company is this delivery from?", "asked_for_company", collected_info, action
 
-    # Fallback for any unexpected messages
-    print(f"--- [DELIVERY LOGIC] Fallback reached. Stage: {stage}, Intent: {intent} ---")
-    return "Sorry, I didn't quite understand. Could you please repeat that?", stage, collected_info, action
+def send_approval_notification(order_id, company, collected_info):
+    """Helper function to send approval notification and return response"""
+    action = {}
+    approval_token = str(uuid.uuid4())
+    ORDER_WALLET[order_id]['approval_token'] = approval_token
+    
+    # Create fallback web link
+    approval_link = f"{BASE_URL}/approve-order?token={approval_token}"
+    
+    if OWNER_PHONE_NUMBER and INTERNAL_API_KEY:
+        # Send push notification to Android app
+        notification_sent = send_push_notification(
+            OWNER_PHONE_NUMBER, 
+            f"Delivery from {company} at door. Click to approve or deny.",
+            approval_token
+        )
+        
+        if notification_sent:
+            return f"I have an order from {company}. I've sent a notification for approval. Please wait a moment.", "awaiting_approval", collected_info, action
+        else:
+            print("❌ Push notification failed, falling back to web approval")
+    
+    # Fallback: print web link (for development) or return error
+    print(f"🔗 [FALLBACK] Web approval link: {approval_link}")
+    return "I need to get approval but the notification system isn't available. Please try again later.", "end_of_call", collected_info, action
 
 # --- MAIN ROUTES ---
 @app.route("/generate", methods=["POST"])
@@ -496,7 +668,9 @@ def health():
     return jsonify({
         "status": "healthy", 
         "openai_client": openai_client is not None, 
-        "google_maps_api": GOOGLE_MAPS_API_KEY is not None
+        "google_maps_api": GOOGLE_MAPS_API_KEY is not None,
+        "nodejs_backend_configured": NODEJS_BACKEND_URL is not None,
+        "internal_api_configured": INTERNAL_API_KEY is not None
     })
 
 @app.route("/test-maps", methods=["POST"])
@@ -524,9 +698,114 @@ def test_maps():
     
     return jsonify({"error": "Invalid test_type"}), 400
 
+@app.route("/add-order", methods=["POST"])
+def add_order():
+    """Secure endpoint to add order details to the wallet."""
+    data = request.get_json()
+    print(f"--- [AUTH] Comparing received key with server key: '{APP_SECRET_KEY}' ---")
+    if not data or data.get("secret_key") != APP_SECRET_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    company = data.get("company", "").title()
+    otp = data.get("otp")
+    tracking_id = data.get("tracking_id")
+
+    if not (company and otp):
+        return jsonify({"error": "Missing 'company' or 'otp'"}), 400
+
+    order_id = str(uuid.uuid4())
+    order_data = {"company": company, "otp": otp, "status": "pending"}
+    if tracking_id:
+        order_data["tracking_id"] = tracking_id.replace(" ", "").upper()
+
+    ORDER_WALLET[order_id] = order_data
+    print(f"✅ Order added [{order_id}] for {company}")
+    return jsonify({"success": True, "order_id": order_id})
+
+@app.route("/approve-order", methods=["GET", "POST"])
+def approve_order():
+    """Handle order approval from web link or Android app"""
+    
+    # Web link approval (GET)
+    if request.method == "GET":
+        token = request.args.get('token')
+        if not token:
+            return "<h1>Error: No approval token provided.</h1>", 400
+
+        order_id_to_approve = None
+        for order_id, order_data in ORDER_WALLET.items():
+            if order_data.get("approval_token") == token:
+                order_id_to_approve = order_id
+                break
+
+        if order_id_to_approve:
+            ORDER_WALLET[order_id_to_approve]["status"] = "approved"
+            ORDER_WALLET[order_id_to_approve].pop("approval_token", None)
+            print(f"✅ Order [{order_id_to_approve}] approved via web link.")
+            return "<h1>Delivery Approved!</h1><p>The OTP has been released to the delivery person.</p>", 200
+        else:
+            return "<h1>Invalid or Expired Link</h1>", 404
+    
+    # Android app approval (POST)
+    elif request.method == "POST":
+        data = request.get_json()
+        
+        if data.get("api_key") != INTERNAL_API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+        
+        token = data.get("approval_token")
+        user_action = data.get("action")  # "approve" or "deny"
+        
+        if not token:
+            return jsonify({"error": "Missing approval token"}), 400
+        
+        order_id_to_approve = None
+        for order_id, order_data in ORDER_WALLET.items():
+            if order_data.get("approval_token") == token:
+                order_id_to_approve = order_id
+                break
+        
+        if not order_id_to_approve:
+            return jsonify({"error": "Invalid or expired token"}), 404
+        
+        if user_action == "approve":
+            ORDER_WALLET[order_id_to_approve]["status"] = "approved"
+            ORDER_WALLET[order_id_to_approve].pop("approval_token", None)
+            print(f"✅ Order [{order_id_to_approve}] approved via Android app.")
+            return jsonify({"success": True, "message": "Delivery approved"})
+        
+        elif user_action == "deny":
+            ORDER_WALLET[order_id_to_approve]["status"] = "denied"
+            ORDER_WALLET[order_id_to_approve].pop("approval_token", None)
+            print(f"❌ Order [{order_id_to_approve}] denied via Android app.")
+            return jsonify({"success": True, "message": "Delivery denied"})
+        
+        else:
+            return jsonify({"error": "Invalid action. Use 'approve' or 'deny'"}), 400
+
+@app.route("/list-orders", methods=["GET"])
+def list_orders():
+    """Debug endpoint to see current orders in wallet"""
+    return jsonify({
+        "orders": ORDER_WALLET,
+        "count": len(ORDER_WALLET)
+    })
+
+@app.route("/clear-orders", methods=["POST"])
+def clear_orders():
+    """Debug endpoint to clear all orders"""
+    data = request.get_json()
+    if data and data.get("secret_key") == APP_SECRET_KEY:
+        ORDER_WALLET.clear()
+        print("🗑️ All orders cleared from wallet")
+        return jsonify({"success": True, "message": "All orders cleared"})
+    return jsonify({"error": "Unauthorized"}), 401
+
 if __name__ == "__main__":
     print("🚀 Starting Flask API on :5001 ...")
     print(f"📍 User location: {USER_LOCATION}")
     print(f"🗝️ OpenAI API: {'✅' if openai_client else '❌'}")
     print(f"🗺️ Google Maps API: {'✅' if GOOGLE_MAPS_API_KEY else '❌'}")
+    print(f"📱 Node.js Backend: {NODEJS_BACKEND_URL}")
+    print(f"🔐 Notification System: {'✅' if INTERNAL_API_KEY and OWNER_PHONE_NUMBER else '❌'}")
     app.run(port=5001, debug=True)
