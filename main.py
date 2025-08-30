@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import json
 import re
+from geopy.distance import geodesic
 
 app = Flask(__name__)
 load_dotenv()
@@ -14,7 +15,7 @@ USER_LOCATION = {
     "lat": float(os.getenv("USER_LAT", 12.912445713301228)),
     "lng": float(os.getenv("USER_LNG", 77.6359444711491))
 }
-MAPBOX_TOKEN = os.getenv("MAPBOX_API_KEY")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 # --- OPENAI CLIENT ---
 try:
@@ -26,76 +27,67 @@ except Exception as e:
     exit(1)
 
 # --- HELPER FUNCTIONS ---
+def clean_location_text(raw_text: str) -> str:
+    """Removes filler words from a spoken location for better geocoding."""
+    cleaned = raw_text.lower()
+    cleaned = re.sub(r"^(i(\s*am|'m)?\s*(here\s*)?(in|at|near)\s+)", "", cleaned)
+    return cleaned.strip().title()
+
 def format_phone_number(number_string: str):
-    """Format phone number to Indian standard with +91 prefix"""
-    if not isinstance(number_string, str):
-        return None
+    if not isinstance(number_string, str): return None
     digits = re.sub(r'\D', '', number_string)
-    if len(digits) == 10:
-        return f"+91{digits}"
-    if len(digits) == 12 and digits.startswith('91'):
-        return f"+{digits}"
+    if len(digits) == 10: return f"+91{digits}"
+    if len(digits) == 12 and digits.startswith('91'): return f"+{digits}"
     return digits if digits else None
 
 def format_number_for_speech(number_string: str):
-    """Convert phone number to speech-friendly format with spaces"""
-    if not number_string:
-        return ""
+    if not number_string: return ""
     return " ".join([ch for ch in number_string if ch.isdigit()])
 
 def detect_user_intent(message: str):
-    """Detect user intent from their message"""
     message_lower = message.lower().strip()
     message_cleaned = re.sub(r'[.!?]', '', message_lower)
-
-    # Location keywords
-    if any(k in message_lower for k in [
-        "road", "nagar", "colony", "market", "station", "gate", "circle", 
-        "apartment", "complex", "mall", "near", "opposite", "metro", "bus stop"
-    ]):
-        return "providing_location"
-        
-    # Delivery keywords
-    if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart"]):
-        return "initial_delivery"
-    
-    # Callback related
-    if any(k in message_lower for k in ["it's fine", "it's ok", 'ask him to call', 'just call me back']):
-        return "non_urgent_callback"
-    if any(k in message_lower for k in ['same number', 'this number', "number i'm calling from"]):
-        return "provide_self_number"
-    if any(k in message_lower for k in ['call back', 'callback', 'call me back']):
-        return "requesting_callback"
-    
-    # Simple yes/no responses
-    if message_cleaned in ['yes', 'yeah', 'yep', 'ok', 'okay', 'sure', 'correct']:
-        return "general_yes"
-    if message_cleaned in ['no', 'nope', 'not really']:
-        return "declining"
-    
-    # Ending conversation
-    if any(k in message_lower for k in ['thank', 'bye', 'thanks']):
-        return "ending_conversation"
-    
+    if any(k in message_lower for k in ["road", "nagar", "colony", "market", "station", "gate", "circle", "apartment", "complex", "mall", "near", "opposite", "metro", "bus stop"]): return "providing_location"
+    if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart"]): return "initial_delivery"
+    if any(k in message_lower for k in ["it's fine", "it's ok", 'ask him to call', 'just call me back']): return "non_urgent_callback"
+    if any(k in message_lower for k in ['same number', 'this number', "number i'm calling from"]): return "provide_self_number"
+    if any(k in message_lower for k in ['call back', 'callback', 'call me back']): return "requesting_callback"
+    if message_cleaned in ['yes', 'yeah', 'yep', 'ok', 'okay', 'sure', 'correct']: return "general_yes"
+    if message_cleaned in ['no', 'nope', 'not really']: return "declining"
+    if any(k in message_lower for k in ['thank', 'bye', 'thanks']): return "ending_conversation"
     return "general"
 
 def extract_information_with_openai(message, collected_info):
-    """Extract structured information using OpenAI"""
-    if not openai_client:
+    """Enhanced information extraction with better prompting for delivery companies."""
+    if not openai_client: 
         return {}
     
+    print("--- [INFO EXTRACTION] Attempting to extract info ---")
+    print(f"--- [INFO EXTRACTION] Message: '{message}' ---")
+    
     try:
-        system_prompt = """
-        You are an expert information extraction assistant.
-        Extract any of the following fields from the user's message: 'name', 'purpose', 'phone', 'company'.
-        You MUST return ONLY a valid JSON object.
-        If no new information is found, return {}.
-        """
-        user_prompt = f"""
-        Current information already collected: {json.dumps(collected_info)}
-        User's latest message: "{message}"
-        """
+        system_prompt = """You are an expert information extraction assistant for phone calls. 
 
+Extract these fields from the user's message:
+- "name": Person's name (if mentioned)
+- "purpose": Reason for calling (if mentioned) 
+- "phone": Phone number (if mentioned)
+- "company": Company name (especially for deliveries - Amazon, Flipkart, Swiggy, Zomato, etc.)
+
+IMPORTANT RULES:
+1. For delivery messages like "I have a delivery from Amazon", extract "company": "Amazon"
+2. For "delivery" without company, don't extract company
+3. Return ONLY a valid JSON object
+4. If no information is found, return {}
+
+Examples:
+- "I have a delivery from Amazon" → {"company": "Amazon"}
+- "delivery for you" → {}
+- "This is John from Flipkart" → {"name": "John", "company": "Flipkart"}
+"""
+        
+        user_prompt = f"Current information: {json.dumps(collected_info)}\nUser's message: \"{message}\""
+        
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -103,123 +95,232 @@ def extract_information_with_openai(message, collected_info):
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=200
+            temperature=0.1,  # Lower temperature for more consistent extraction
+            max_tokens=150
         )
-
-        extracted_text = response.choices[0].message.content.strip()
-        extracted = json.loads(extracted_text)
-
-        # Format phone number if extracted
-        if extracted.get("phone"):
-            formatted_number = format_phone_number(extracted["phone"])
-            if formatted_number:
-                extracted["phone"] = formatted_number
-            else:
-                del extracted["phone"]
-
+        
+        extracted = json.loads(response.choices[0].message.content.strip())
         print(f"✅ [INFO EXTRACTION] Extracted: {extracted}")
+        
+        # Clean up phone number if present
+        if extracted.get("phone"):
+            formatted = format_phone_number(extracted["phone"])
+            if formatted: 
+                extracted["phone"] = formatted
+            else: 
+                del extracted["phone"]
+        
+        # Clean up company name if present
+        if extracted.get("company"):
+            extracted["company"] = extracted["company"].strip().title()
+            
         return extracted
+        
     except Exception as e:
         print(f"❌ [INFO EXTRACTION ERROR] {e}")
         return {}
-
-# --- MAPBOX FUNCTIONS ---
-def geocode_with_proximity(address_text):
-    """
-    Geocode an address string near the user's location using Mapbox.
-    Returns dict with lat, lng, place_name or None if not found.
-    """
-    if not MAPBOX_TOKEN:
-        print("❌ MAPBOX_TOKEN not configured")
-        return None
-
+    
+# --- GOOGLE MAPS FUNCTIONS (OPTIMIZED) ---
+def enhance_search_query_with_ai(query):
+    """Use OpenAI to dynamically enhance search queries with context."""
+    if not openai_client:
+        return get_fallback_queries(query)
+    
     try:
-        url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{address_text}.json"
-        params = {
-            "access_token": MAPBOX_TOKEN,
-            "proximity": f"{USER_LOCATION['lng']},{USER_LOCATION['lat']}",
-            "limit": 1
-        }
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        system_prompt = """You are a search query enhancement expert. Analyze the user's location query and enhance it for better Google Maps search results.
 
-        if not data.get("features"):
-            return None
+RULES:
+1. Recognize brands and expand them (e.g., "Popeyes" → "Popeyes Louisiana Kitchen")
+2. Add relevant context (restaurant, hotel, mall, etc.)
+3. Include location context "near me" or "Bengaluru" when appropriate
+4. Generate 3-4 variations of the query
+5. Return ONLY a JSON array of query strings
 
-        feature = data["features"][0]
-        coords = feature.get("geometry", {}).get("coordinates")
-        place_name = feature.get("place_name", address_text)
+Examples:
+- Input: "popeyes" → Output: ["popeyes louisiana kitchen near me", "popeyes chicken restaurant", "popeyes bengaluru"]
+- Input: "hsr layout" → Output: ["hsr layout bengaluru", "hsr layout sector", "hsr layout near me"]
+- Input: "metro station" → Output: ["metro station near me", "namma metro station", "bangalore metro station"]
+"""
 
-        if coords and len(coords) == 2:
-            return {
-                "lng": coords[0],
-                "lat": coords[1],
-                "place_name": place_name
-            }
-        return None
-
-    except Exception as e:
-        print(f"❌ Geocoding error: {e}")
-        return None
-
-def get_directions_from_caller(caller_address):
-    """
-    Get driving directions from caller's location to user's location.
-    Returns: (coordinates_dict, place_name, directions_text)
-    """
-    caller_result = geocode_with_proximity(caller_address)
-    if not caller_result:
-        return None, None, None
-
-    try:
-        url = (
-            f"https://api.mapbox.com/directions/v5/mapbox/driving/"
-            f"{caller_result['lng']},{caller_result['lat']};"
-            f"{USER_LOCATION['lng']},{USER_LOCATION['lat']}"
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Enhance this location query: '{query}'"}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=150
         )
-        params = {
-            "steps": "true",
-            "overview": "full",
-            "access_token": MAPBOX_TOKEN
-        }
+        
+        result = json.loads(response.choices[0].message.content.strip())
+        enhanced_queries = result.get("queries", []) if isinstance(result, dict) else result
+        
+        if query not in enhanced_queries:
+            enhanced_queries.append(query)
+            
+        return enhanced_queries[:4]
+        
+    except Exception as e:
+        print(f"❌ AI query enhancement failed: {e}")
+        return get_fallback_queries(query)
 
+def get_fallback_queries(query):
+    """Fallback queries if AI enhancement fails."""
+    fallback_queries = [
+        f"{query} near me",
+        f"{query} Bengaluru",
+        query,
+        f"{query} restaurant" if len(query.split()) < 3 else query
+    ]
+    return list(dict.fromkeys(fallback_queries))[:4]
+
+def geocode_with_google(address_text, max_distance_km=10):
+    """Enhanced geocoding with AI-powered query optimization."""
+    cleaned_text = clean_location_text(address_text)
+    
+    if not cleaned_text or not GOOGLE_MAPS_API_KEY:
+        return None
+    
+    enhanced_queries = enhance_search_query_with_ai(cleaned_text)
+    final_results = []
+    user_loc = (USER_LOCATION['lat'], USER_LOCATION['lng'])
+    
+    print(f"🔍 AI-enhanced queries for '{cleaned_text}': {enhanced_queries}")
+    
+    for query in enhanced_queries:
+        try:
+            # Try Text Search first
+            url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+            params = {
+                "query": query,
+                "key": GOOGLE_MAPS_API_KEY,
+                "location": f"{USER_LOCATION['lat']},{USER_LOCATION['lng']}",
+                "radius": max_distance_km * 1000
+            }
+            
+            resp = requests.get(url, params=params, timeout=10).json()
+            
+            if resp.get("status") != "OK":
+                continue
+                
+            for place in resp.get("results", [])[:5]:  # Limit to top 5 results
+                loc = place.get("geometry", {}).get("location")
+                if not loc:
+                    continue
+                
+                coords = (loc["lat"], loc["lng"])
+                distance = geodesic(coords, user_loc).km
+                
+                if distance <= max_distance_km:
+                    result_data = {
+                        "lat": loc["lat"],
+                        "lng": loc["lng"],
+                        "place_name": place.get("name", "Unknown Place"),
+                        "address": place.get("formatted_address") or place.get("vicinity", ""),
+                        "distance_from_user": round(distance, 2),
+                        "types": place.get("types", []),
+                        "query_used": query
+                    }
+                    
+                    # Avoid duplicates
+                    if not any(r['place_name'] == result_data['place_name'] for r in final_results):
+                        final_results.append(result_data)
+            
+        except Exception as e:
+            print(f"❌ Geocoding error for query '{query}': {e}")
+            continue
+    
+    # Sort by distance
+    final_results.sort(key=lambda x: x["distance_from_user"])
+    
+    print(f"✅ Found {len(final_results)} results for '{cleaned_text}'")
+    return final_results if final_results else None
+
+def get_directions_from_google(origin_coords):
+    """Get driving directions from origin to user location."""
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+    
+    try:
+        origin = f"{origin_coords['lat']},{origin_coords['lng']}"
+        destination = f"{USER_LOCATION['lat']},{USER_LOCATION['lng']}"
+        
+        url = "https://maps.googleapis.com/maps/api/directions/json"
+        params = {
+            "origin": origin,
+            "destination": destination,
+            "mode": "driving",
+            "key": GOOGLE_MAPS_API_KEY
+        }
+        
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-
-        if not data.get("routes"):
-            return caller_result, caller_result["place_name"], None
-
-        # Extract turn-by-turn directions
-        legs = data["routes"][0].get("legs", [])
-        if not legs or not legs[0].get("steps"):
-            return caller_result, caller_result["place_name"], None
-
-        steps = legs[0]["steps"]
-        directions_list = []
         
-        for step in steps[:4]:  # Limit to first 4 steps for brevity
-            instruction = step.get("maneuver", {}).get("instruction")
-            if instruction:
-                directions_list.append(instruction)
-
-        if directions_list:
-            directions = ". Then, ".join(directions_list)
-            return caller_result, caller_result["place_name"], directions
-        else:
-            return caller_result, caller_result["place_name"], None
-
+        if data.get("status") != "OK" or not data.get("routes"):
+            return None
+        
+        # Extract simplified directions
+        route = data["routes"][0]
+        legs = route.get("legs", [])
+        
+        if not legs:
+            return None
+        
+        steps = []
+        for step in legs[0].get("steps", [])[:6]:  # First 6 steps
+            instr = step.get("html_instructions", "")
+            instr_clean = re.sub(r'<.*?>', ' ', instr).strip()
+            steps.append(instr_clean)
+        
+        if steps:
+            return ". Then, ".join(steps)
+        
+        # Fallback: provide straight-line direction
+        return f"Head towards the destination from {origin_coords.get('place_name', 'your location')}"
+        
     except Exception as e:
-        print(f"❌ Directions error: {e}")
-        return caller_result, caller_result["place_name"], None
+        print(f"❌ Google Directions error: {e}")
+        return None
 
-# --- UNKNOWN CALLER LOGIC ---
+def get_estimated_arrival_time(origin_coords):
+    """Get estimated travel time from origin to destination."""
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+    
+    try:
+        origin = f"{origin_coords['lat']},{origin_coords['lng']}"
+        destination = f"{USER_LOCATION['lat']},{USER_LOCATION['lng']}"
+        
+        url = "https://maps.googleapis.com/maps/api/directions/json"
+        params = {
+            "origin": origin,
+            "destination": destination,
+            "mode": "driving",
+            "key": GOOGLE_MAPS_API_KEY,
+            "departure_time": "now"
+        }
+        
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if data.get("status") == "OK" and data.get("routes"):
+            leg = data["routes"][0]["legs"][0]
+            duration = leg.get("duration", {}).get("text", "")
+            if duration:
+                return f"Estimated travel time: {duration}"
+        
+        return None
+        
+    except Exception as e:
+        print(f"❌ Travel time estimation error: {e}")
+        return None
+    
+    # --- UNKNOWN CALLER LOGIC ---
 def handle_unknown_logic(message: str, stage: str, collected_info: dict, caller_id=None):
     """Handle conversation flow for unknown callers"""
-    
-    # Check for urgent calls first
     if any(k in message.lower() for k in ['urgent', 'asap', 'emergency']):
         name_to_use = collected_info.get("name", "An unknown caller")
         response_text = "Okay, I understand this is urgent. I am notifying Ruchit immediately."
@@ -232,12 +333,10 @@ def handle_unknown_logic(message: str, stage: str, collected_info: dict, caller_
     if stage == "start":
         return "May I know who's calling?", "asking_name", collected_info, action
 
-    # Handle self-number provision
     if stage == "collecting_contact" and intent == "provide_self_number":
         collected_info['phone'] = "Caller's Number"
         return "Okay, noted. Ruchit will call you back on the number you are calling from. Thank you!", "end_of_call", collected_info, action
 
-    # Extract information using OpenAI
     extracted_info = extract_information_with_openai(message, collected_info)
     collected_info.update(extracted_info)
 
@@ -250,7 +349,6 @@ def handle_unknown_logic(message: str, stage: str, collected_info: dict, caller_
     if stage == "asking_purpose":
         if not collected_info.get("purpose"):
             collected_info["purpose"] = message
-        
         if not collected_info.get("phone"):
             return "Got it. What's the best number for Ruchit to call you back on?", "collecting_contact", collected_info, action
         else:
@@ -266,139 +364,163 @@ def handle_unknown_logic(message: str, stage: str, collected_info: dict, caller_
 
     return "Thank you. I'll make sure Ruchit gets the message.", "end_of_call", collected_info, action
 
-# --- DELIVERY CALLER LOGIC ---
+# --- DELIVERY LOGIC (OPTIMIZED) ---
+# --- DELIVERY LOGIC (MODIFIED TO BE MORE DECISIVE) ---
+# --- DELIVERY LOGIC (WITH PROACTIVE COMPANY EXTRACTION) ---
+# --- DELIVERY LOGIC (FINAL, MORE ROBUST VERSION) ---
+# --- DELIVERY LOGIC (FINAL, WITH DEBUG LOGGING) ---
 def handle_delivery_logic(message: str, stage: str, collected_info: dict):
-    """Handle conversation flow for delivery persons"""
+    """Handles the delivery flow with robust logging to debug proactive extraction."""
     intent = detect_user_intent(message)
     action = {}
+    print(f"\n--- [DELIVERY LOGIC] START ---")
+    print(f"--- [DELIVERY LOGIC] Stage: {stage}, Intent: {intent} ---")
+    print(f"--- [DELIVERY LOGIC] Current collected_info: {collected_info} ---")
 
-    # Stage 1: Initial delivery mention
+    # Stage 1: Handle the very first turn of a delivery call
     if stage == "start" and intent == "initial_delivery":
-        return "Which company is the delivery from?", "asked_for_company", collected_info, action
+        print("--- [DELIVERY LOGIC] In Stage 1: 'start' with initial_delivery intent ---")
+        
+        # Extract information from the message
+        extracted_info = extract_information_with_openai(message, collected_info)
+        print(f"--- [DELIVERY LOGIC] Raw extracted_info: {extracted_info} ---")
+        
+        # Update collected_info with extracted information
+        collected_info.update(extracted_info)
+        print(f"--- [DELIVERY LOGIC] Updated collected_info: {collected_info} ---")
+        
+        company = collected_info.get("company")
+        print(f"--- [DELIVERY LOGIC] Final company value: '{company}' ---")
 
-    # Stage 2: Getting company name
+        if company:
+            print(f"--- [DELIVERY LOGIC] Company found: '{company}'. Skipping company question. ---")
+            response_text = f"Got it, a delivery from {company}. Do you need directions to reach here?"
+            new_stage = "asked_for_directions"
+            print(f"--- [DELIVERY LOGIC] Returning: '{response_text}' with stage '{new_stage}' ---")
+            return response_text, new_stage, collected_info, action
+        else:
+            print("--- [DELIVERY LOGIC] No company found. Asking for company. ---")
+            response_text = "Which company is the delivery from?"
+            new_stage = "asked_for_company"
+            return response_text, new_stage, collected_info, action
+
+    # Stage 2: Handle the turn after we've asked for the company name
     if stage == "asked_for_company":
-        collected_info["company"] = message.replace('.', '').strip().title()
+        print("--- [DELIVERY LOGIC] In Stage 2: 'asked_for_company' ---")
+        extracted_info = extract_information_with_openai(message, collected_info)
+        company = extracted_info.get("company")
+        
+        if not company:
+            # If OpenAI didn't extract it, treat the whole message as company name
+            company = message.replace('.', '').strip()
+
+        collected_info["company"] = company.title()
         return f"Got it, a delivery from {collected_info['company']}. Do you need directions to reach here?", "asked_for_directions", collected_info, action
 
-    # Stage 3: Asking about directions
+    # Stage 3: Directions need assessment
     if stage == "asked_for_directions":
+        print("--- [DELIVERY LOGIC] In Stage 3: 'asked_for_directions' ---")
         if intent == "general_yes":
-            return "Sure. Where are you coming from? Please tell me a landmark or your area.", "asked_for_location", collected_info, action
+            return "Sure. Where are you coming from? Please tell me a landmark or your current area.", "asked_for_location", collected_info, action
         elif intent == "declining":
-            return "No problem! Please leave the package with the security guard, Kumar, at the main gate.", "end_of_call", collected_info, action
+            return "No problem! Please leave the package with the security guard, Kumar, at the main gate. Thank you!", "end_of_call", collected_info, action
         else:
-            # Handle unclear responses
             return "Sorry, I didn't get that. Do you need directions? Please say yes or no.", "asked_for_directions", collected_info, action
 
-    # Stage 4: Getting location and providing directions
+    # Stage 4: Location processing
     if stage == "asked_for_location":
-        # Accept any response as a location attempt (more robust than intent checking)
+        print("--- [DELIVERY LOGIC] In Stage 4: 'asked_for_location' ---")
         caller_location_text = message.strip()
-        
-        start_coords, start_place_name, directions = get_directions_from_caller(caller_location_text)
-        
-        if not start_coords:
-            return f"I couldn't find a location for '{caller_location_text}'. Could you please name a more specific landmark or area?", "asked_for_location", collected_info, action
+        geocoded_results = geocode_with_google(caller_location_text)
 
-        response_end = "Please leave the package with Kumar at the main gate."
-        
-        if directions:
-            return f"From {start_place_name}: {directions}. {response_end}", "directions_provided", collected_info, action
-        else:
-            # Fallback if directions fail but geocoding works
-            return f"From {start_place_name}, please head towards the destination address. {response_end}", "directions_provided", collected_info, action
+        if not geocoded_results:
+            return f"I couldn't find '{caller_location_text}' nearby. Could you please name a specific landmark, main road, or area in Bengaluru?", "asked_for_location", collected_info, action
 
-    # Handle conversation ending
+        location_choice = geocoded_results[0]
+        directions = get_directions_from_google(location_choice)
+        eta = get_estimated_arrival_time(location_choice)
+        
+        response_parts = [f"Okay, from {location_choice['place_name']}:"]
+        if directions: response_parts.append(f"Directions: {directions}.")
+        if eta: response_parts.append(eta)
+        response_parts.append("Please leave the package with Kumar at the main gate. Thank you!")
+        
+        return " ".join(response_parts), "directions_provided", collected_info, action
+
+    # Stage 5: Conversation ending
     if intent == "ending_conversation":
+        print("--- [DELIVERY LOGIC] In Stage 5: 'ending_conversation' ---")
         return "You're welcome! Thanks for the delivery and drive safely!", "end_of_call", collected_info, action
 
-    # Fallback for unexpected states
+    # Fallback for any unexpected messages
+    print(f"--- [DELIVERY LOGIC] Fallback reached. Stage: {stage}, Intent: {intent} ---")
     return "Sorry, I didn't quite understand. Could you please repeat that?", stage, collected_info, action
 
 # --- MAIN ROUTES ---
 @app.route("/generate", methods=["POST"])
 def generate():
-    """Main endpoint for processing conversation turns"""
     try:
         data = request.get_json(force=True)
-        new_message = data.get("new_message", "").strip()
-        caller_role = data.get("caller_role", "unknown")
-        history = data.get("history", []) or []
-        stage = data.get("conversation_stage", "start")
-        collected_info = data.get("collected_info", {}) or {}
-        caller_id = data.get("caller_id")
-
-        if not new_message:
-            return jsonify({"error": "'new_message' is required"}), 400
-
-        # Initialize default values
-        response_text, new_stage, updated_info, action = "", stage, collected_info, {}
-
-        # Route to appropriate handler
-        if caller_role == "delivery":
-            response_text, new_stage, updated_info, action = handle_delivery_logic(new_message, stage, collected_info)
-        else:
-            # Default to unknown caller logic
-            response_text, new_stage, updated_info, action = handle_unknown_logic(new_message, stage, collected_info, caller_id)
-
-        # Detect intent for metadata
-        intent = detect_user_intent(new_message)
+        new_message, caller_role = data.get("new_message", "").strip(), data.get("caller_role", "unknown")
+        history, stage = data.get("history", []) or [], data.get("conversation_stage", "start")
+        collected_info, caller_id = data.get("collected_info", {}) or {}, data.get("caller_id")
         
-        # Update conversation history
-        updated_history = history + [
-            {"role": "user", "parts": [new_message]},
-            {"role": "model", "parts": [response_text]}
-        ]
-
+        if not new_message: 
+            return jsonify({"error": "'new_message' is required"}), 400
+        
+        if caller_role == "delivery": 
+            response_text, new_stage, updated_info, action = handle_delivery_logic(new_message, stage, collected_info)
+        else: 
+            response_text, new_stage, updated_info, action = handle_unknown_logic(new_message, stage, collected_info, caller_id)
+        
+        intent = detect_user_intent(new_message)
+        updated_history = history + [{"role": "user", "parts": [new_message]}, {"role": "model", "parts": [response_text]}]
+        
         print(f"🎯 Role={caller_role} | Intent={intent} | Stage: {stage} -> {new_stage}")
         
         return jsonify({
-            "response_text": response_text,
-            "updated_history": updated_history,
-            "intent": intent,
-            "stage": new_stage,
-            "collected_info": updated_info,
+            "response_text": response_text, 
+            "updated_history": updated_history, 
+            "intent": intent, 
+            "stage": new_stage, 
+            "collected_info": updated_info, 
             "action": action
         })
-
+        
     except Exception as e:
         print(f"❌ [GENERATE ERROR] {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check endpoint"""
     return jsonify({
-        "status": "healthy",
-        "openai_client": openai_client is not None,
-        "mapbox_token": MAPBOX_TOKEN is not None
+        "status": "healthy", 
+        "openai_client": openai_client is not None, 
+        "google_maps_api": GOOGLE_MAPS_API_KEY is not None
     })
 
-@app.route("/test", methods=["POST"])
-def test_endpoints():
-    """Test endpoint for debugging"""
+@app.route("/test-maps", methods=["POST"])
+def test_maps():
+    """Test endpoint for Google Maps functionality"""
     data = request.get_json(force=True)
     test_type = data.get("test_type")
+    address = data.get("address", "Koramangala")
     
     if test_type == "geocode":
-        address = data.get("address", "MG Road Bangalore")
-        result = geocode_with_proximity(address)
+        result = geocode_with_google(address)
         return jsonify({"geocode_result": result})
     
     elif test_type == "directions":
-        address = data.get("address", "MG Road Bangalore")
-        coords, place_name, directions = get_directions_from_caller(address)
-        return jsonify({
-            "coordinates": coords,
-            "place_name": place_name,
-            "directions": directions
-        })
-    
-    elif test_type == "intent":
-        message = data.get("message", "I have a delivery")
-        intent = detect_user_intent(message)
-        return jsonify({"intent": intent})
+        results = geocode_with_google(address)
+        if results:
+            directions = get_directions_from_google(results[0])
+            eta = get_estimated_arrival_time(results[0])
+            return jsonify({
+                "place": results[0]["place_name"],
+                "directions": directions,
+                "eta": eta
+            })
+        return jsonify({"error": "No results found"})
     
     return jsonify({"error": "Invalid test_type"}), 400
 
@@ -406,5 +528,5 @@ if __name__ == "__main__":
     print("🚀 Starting Flask API on :5001 ...")
     print(f"📍 User location: {USER_LOCATION}")
     print(f"🗝️ OpenAI API: {'✅' if openai_client else '❌'}")
-    print(f"🗺️ Mapbox API: {'✅' if MAPBOX_TOKEN else '❌'}")
+    print(f"🗺️ Google Maps API: {'✅' if GOOGLE_MAPS_API_KEY else '❌'}")
     app.run(port=5001, debug=True)
