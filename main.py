@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import json
 import re
-import uuid
+from datetime import datetime
+from functools import wraps
 import time
 from geopy.distance import geodesic
 
@@ -221,7 +222,7 @@ def detect_user_intent(message: str):
         return "requesting_otp"
     
     # Check for company + OTP context
-    company_keywords = ['amazon', 'flipkart', 'myntra', 'zomato', 'swiggy', 'delivery']
+    company_keywords = ['amazon', 'flipkart', 'myntra', 'zomato', 'swiggy', 'delivery','zepto','bluedart']
     if (any(company in message_lower for company in company_keywords) and 
         any(otp in message_lower for otp in ['code', 'otp', 'pin'])):
         return "requesting_otp"
@@ -229,7 +230,7 @@ def detect_user_intent(message: str):
     # Rest of existing intent detection logic
     if any(k in message_lower for k in ["road", "nagar", "colony", "market", "station", "gate", "circle", "apartment", "complex", "mall", "near", "opposite", "metro", "bus stop"]): 
         return "providing_location"
-    if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart"]): 
+    if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart","swiggy", "zomato","zepto"]): 
         return "initial_delivery"
     if any(k in message_lower for k in ["it's fine", "it's ok", 'ask him to call', 'just call me back']): 
         return "non_urgent_callback"
@@ -803,6 +804,40 @@ def handle_arrival_and_otp_check(collected_info):
     # Ask if they need OTP
     return f"Excellent! You've reached the location with your {company} delivery. Do you need the OTP?", "asking_if_otp_needed", collected_info, {}
 
+def rate_limit_otp(max_requests=5, window=300):  # 5 requests per 5 minutes
+    """Rate limiting decorator for OTP endpoints"""
+    request_log = {}
+    
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            client_ip = request.remote_addr
+            firebase_uid = request.get_json().get("firebaseUid", client_ip)
+            
+            current_time = datetime.now().timestamp()
+            key = f"{firebase_uid}:{client_ip}"
+            
+            # Clean old entries
+            request_log[key] = [
+                req_time for req_time in request_log.get(key, []) 
+                if current_time - req_time < window
+            ]
+            
+            # Check rate limit
+            if len(request_log.get(key, [])) >= max_requests:
+                return jsonify({
+                    "success": False,
+                    "error": "Too many OTP requests. Please wait before trying again.",
+                    "retry_after": window
+                }), 429
+            
+            # Log this request
+            request_log.setdefault(key, []).append(current_time)
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
 def handle_existing_delivery_logic(message, stage, collected_info, intent, action):
     """Handle the existing delivery logic for OTP verification"""
     
@@ -939,7 +974,7 @@ def send_approval_notification(order_id, company, collected_info):
 @app.route("/generate", methods=["POST"])
 def generate():
     """
-    Main endpoint that handles both delivery logic and OTP requests
+    Main endpoint that handles conversation flow
     """
     try:
         data = request.get_json(force=True)
@@ -948,31 +983,58 @@ def generate():
         history = data.get("history", []) or []
         stage = data.get("conversation_stage", "start")
         
-        # Extract firebaseUid from the request
         collected_info = data.get("collected_info", {}) or {}
         firebase_uid = data.get("firebaseUid")
         
-        # Add it to collected_info to keep it with the conversation
         if firebase_uid:
             collected_info['firebaseUid'] = firebase_uid
         
         if not new_message: 
             return jsonify({"error": "'new_message' is required"}), 400
         
-        # Handle delivery calls with integrated OTP functionality
+        # Handle conversation logic
         if caller_role == "delivery": 
-            response_text, new_stage, updated_info, action = handle_delivery_logic(new_message, stage, collected_info)
+            response_text, new_stage, updated_info, action = handle_delivery_logic(
+                new_message, stage, collected_info
+            )
         else: 
             caller_id = data.get("caller_id")
-            response_text, new_stage, updated_info, action = handle_unknown_logic(new_message, stage, collected_info, caller_id)
+            response_text, new_stage, updated_info, action = handle_unknown_logic(
+                new_message, stage, collected_info, caller_id
+            )
         
         intent = detect_user_intent(new_message)
-       
-        # If the action type is PROVIDE_OTP, update the intent
+        
+        # Handle OTP action - fetch OTP immediately if needed
         if action.get("type") == "PROVIDE_OTP":
             intent = "provide_otp"
+            
+            # Try to get OTP details from updated_info
+            firebase_uid = updated_info.get('firebaseUid')
+            company = updated_info.get('company')
+            order_id = updated_info.get('order_id')
+            
+            if all([firebase_uid, company, order_id]):
+                otp_result = fetch_otp_from_backend(firebase_uid, company, order_id)
+                
+                if otp_result["success"]:
+                    formatted_otp = format_otp_for_speech(otp_result["otp"])
+                    response_text = f"Here's your OTP for {company}: {formatted_otp}"
+                    
+                    # Update action with actual OTP
+                    action.update({
+                        "otp": otp_result["otp"],
+                        "formatted_otp": formatted_otp,
+                        "otp_retrieved": True
+                    })
+                else:
+                    response_text = f"I'm having trouble getting your OTP for {company}. Please try again."
+                    action["otp_error"] = otp_result.get("error", "Unknown error")
 
-        updated_history = history + [{"role": "user", "parts": [new_message]}, {"role": "model", "parts": [response_text]}]
+        updated_history = history + [
+            {"role": "user", "parts": [new_message]}, 
+            {"role": "model", "parts": [response_text]}
+        ]
         
         print(f"🎯 Role={caller_role} | Intent={intent} | Stage: {stage} -> {new_stage}")
         
@@ -987,34 +1049,54 @@ def generate():
         
     except Exception as e:
         print(f"❌ [GENERATE ERROR] {e}")
-        return jsonify({"error": "Internal server error"}), 500
-
+        return jsonify({
+            "error": "Internal server error",
+            "details": str(e) if app.debug else None
+        }), 500
+    
 @app.route("/api/get-otp", methods=["POST"])
+@rate_limit_otp(max_requests=3, window=300)  # Stricter rate limiting for direct OTP
 def get_otp_direct():
     """
-    Direct OTP endpoint that your Node.js can call when it detects
-    the AI response has intent: "provide_otp"
+    Direct OTP endpoint - use as fallback or for external integrations
     """
     try:
         data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ["firebaseUid", "company", "orderId"]
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        
+        if missing_fields:
+            return jsonify({
+                "success": False,
+                "error": f"Missing required parameters: {', '.join(missing_fields)}"
+            }), 400
         
         firebase_uid = data.get("firebaseUid")
         company = data.get("company")
         order_id = data.get("orderId")
         
-        if not all([firebase_uid, company, order_id]):
-            return jsonify({
-                "success": False,
-                "error": "Missing required parameters: firebaseUid, company, orderId"
-            }), 400
-        
         print(f"📱 [DIRECT OTP] Request for {company} order {order_id}")
         
-        # Fetch OTP from your Node.js backend
+        # Check if order exists in local wallet and is approved
+        order_data = ORDER_WALLET.get(order_id)
+        if order_data and order_data.get("status") != "approved":
+            return jsonify({
+                "success": False,
+                "error": f"Order status is {order_data.get('status', 'unknown')}. Only approved orders can get OTP.",
+                "speech_text": "The delivery hasn't been approved yet. Please wait for approval."
+            }), 403
+        
+        # Fetch OTP from Node.js backend
         otp_result = fetch_otp_from_backend(firebase_uid, company, order_id)
         
         if otp_result["success"]:
             formatted_otp = format_otp_for_speech(otp_result["otp"])
+            
+            # Mark order as completed in local wallet
+            if order_id in ORDER_WALLET:
+                ORDER_WALLET[order_id]["status"] = "completed"
             
             return jsonify({
                 "success": True,
@@ -1026,7 +1108,7 @@ def get_otp_direct():
             return jsonify({
                 "success": False,
                 "error": otp_result.get("error", "Could not retrieve OTP"),
-                "speech_text": f"Sorry, I couldn't get the OTP for {company}. Please try again."
+                "speech_text": f"Sorry, I couldn't get the OTP for {company}. {otp_result.get('error', 'Please try again.')}"
             })
         
     except Exception as e:
@@ -1035,6 +1117,202 @@ def get_otp_direct():
             "success": False,
             "error": str(e),
             "speech_text": "I'm having trouble getting your OTP right now."
+        }), 500
+
+@app.route("/api/check-otp-status", methods=["POST"])
+def check_otp_status():
+    """
+    New endpoint to check if OTP can be provided for an order
+    """
+    try:
+        data = request.get_json()
+        
+        firebase_uid = data.get("firebaseUid")
+        company = data.get("company")
+        order_id = data.get("orderId")
+        
+        if not all([firebase_uid, company]):
+            return jsonify({
+                "success": False,
+                "error": "Missing firebaseUid or company"
+            }), 400
+        
+        # Find matching order if order_id not provided
+        if not order_id:
+            for oid, order_data in ORDER_WALLET.items():
+                if (order_data.get("company", "").lower() == company.lower() and 
+                    order_data.get("status") in ["pending", "approved"]):
+                    order_id = oid
+                    break
+        
+        if not order_id:
+            return jsonify({
+                "success": False,
+                "can_provide_otp": False,
+                "reason": "no_matching_order",
+                "message": f"No pending orders found for {company}"
+            })
+        
+        order_data = ORDER_WALLET.get(order_id)
+        if not order_data:
+            return jsonify({
+                "success": False,
+                "can_provide_otp": False,
+                "reason": "order_not_found",
+                "message": "Order not found in system"
+            })
+        
+        status = order_data.get("status")
+        
+        return jsonify({
+            "success": True,
+            "can_provide_otp": status == "approved",
+            "order_id": order_id,
+            "status": status,
+            "company": order_data.get("company"),
+            "needs_approval": status == "pending",
+            "message": {
+                "pending": "Order needs approval before OTP can be provided",
+                "approved": "OTP can be provided",
+                "completed": "Order already completed",
+                "denied": "Order was denied"
+            }.get(status, "Unknown order status")
+        })
+        
+    except Exception as e:
+        print(f"❌ [CHECK OTP STATUS ERROR] {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/bulk-otp-check", methods=["POST"])
+def bulk_otp_check():
+    """
+    Check OTP availability for multiple companies/orders at once
+    """
+    try:
+        data = request.get_json()
+        firebase_uid = data.get("firebaseUid")
+        companies = data.get("companies", [])  # List of company names
+        
+        if not firebase_uid:
+            return jsonify({"error": "firebaseUid required"}), 400
+        
+        if not companies:
+            # Return all available orders for this user
+            available_orders = []
+            for order_id, order_data in ORDER_WALLET.items():
+                if order_data.get("status") in ["pending", "approved"]:
+                    available_orders.append({
+                        "order_id": order_id,
+                        "company": order_data.get("company"),
+                        "status": order_data.get("status"),
+                        "can_provide_otp": order_data.get("status") == "approved"
+                    })
+            
+            return jsonify({
+                "success": True,
+                "available_orders": available_orders,
+                "total_count": len(available_orders)
+            })
+        
+        # Check specific companies
+        results = []
+        for company in companies:
+            matching_orders = []
+            for order_id, order_data in ORDER_WALLET.items():
+                if (order_data.get("company", "").lower() == company.lower() and 
+                    order_data.get("status") in ["pending", "approved"]):
+                    matching_orders.append({
+                        "order_id": order_id,
+                        "status": order_data.get("status"),
+                        "can_provide_otp": order_data.get("status") == "approved"
+                    })
+            
+            results.append({
+                "company": company,
+                "orders": matching_orders,
+                "has_orders": len(matching_orders) > 0
+            })
+        
+        return jsonify({
+            "success": True,
+            "results": results
+        })
+        
+    except Exception as e:
+        print(f"❌ [BULK OTP CHECK ERROR] {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/test-otp-flow", methods=["POST"])
+def test_otp_flow():
+    """
+    Test endpoint to simulate complete OTP flow
+    """
+    try:
+        data = request.get_json()
+        firebase_uid = data.get("firebaseUid", "test-user-123")
+        company = data.get("company", "Amazon")
+        
+        # Create a test order
+        order_id = str(uuid.uuid4())
+        ORDER_WALLET[order_id] = {
+            "company": company,
+            "otp": "123456",  # Test OTP
+            "status": "approved",  # Pre-approved for testing
+            "tracking_id": "TEST123"
+        }
+        
+        # Test the OTP fetch
+        otp_result = fetch_otp_from_backend(firebase_uid, company, order_id)
+        
+        return jsonify({
+            "success": True,
+            "test_order_id": order_id,
+            "otp_fetch_result": otp_result,
+            "message": "Test OTP flow completed"
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/otp-analytics", methods=["GET"])
+def otp_analytics():
+    """
+    Analytics endpoint for OTP usage
+    """
+    try:
+        # Count orders by status
+        status_counts = {}
+        company_counts = {}
+        
+        for order_data in ORDER_WALLET.values():
+            status = order_data.get("status", "unknown")
+            company = order_data.get("company", "unknown")
+            
+            status_counts[status] = status_counts.get(status, 0) + 1
+            company_counts[company] = company_counts.get(company, 0) + 1
+        
+        return jsonify({
+            "total_orders": len(ORDER_WALLET),
+            "status_breakdown": status_counts,
+            "company_breakdown": company_counts,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
         }), 500
     
 @app.route("/health", methods=["GET"])
