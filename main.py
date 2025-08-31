@@ -93,6 +93,100 @@ def send_push_notification(phone_number: str, message: str, approval_token: str)
         print(f"❌ [NOTIFICATION] Unexpected error: {e}")
         return False
 
+def fetch_otp_from_backend(firebase_uid: str, sender: str, order_id: str):
+    """
+    Fetch OTP from Node.js backend for delivery verification
+    
+    Args:
+        firebase_uid: User's Firebase UID
+        sender: Company/service name (e.g., "Amazon", "Flipkart")
+        order_id: Delivery order ID
+    
+    Returns:
+        dict: OTP response or error
+    """
+    try:
+        otp_endpoint = f"{NODEJS_BACKEND_URL}/api/delivery/otp/{firebase_uid}"
+        
+        params = {
+            "sender": sender,
+            "orderId": order_id
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {INTERNAL_API_KEY}",
+            "User-Agent": "DeliveryBot/1.0"
+        }
+        
+        print(f"📱 [OTP] Fetching from: {otp_endpoint}")
+        print(f"📱 [OTP] Params: {params}")
+        
+        response = requests.get(
+            otp_endpoint, 
+            params=params,
+            headers=headers, 
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            otp_data = response.json()
+            print(f"✅ [OTP] Retrieved successfully: {otp_data}")
+            return {
+                "success": True,
+                "otp": otp_data.get("otp"),
+                "message": otp_data.get("message", "OTP retrieved successfully")
+            }
+        elif response.status_code == 404:
+            print(f"❌ [OTP] No OTP found for the given parameters")
+            return {
+                "success": False,
+                "error": "No OTP found for this delivery"
+            }
+        else:
+            print(f"❌ [OTP] Backend error: {response.status_code} - {response.text}")
+            return {
+                "success": False,
+                "error": f"Backend error: {response.status_code}"
+            }
+            
+    except requests.exceptions.Timeout:
+        print("❌ [OTP] Timeout connecting to Node.js backend")
+        return {
+            "success": False,
+            "error": "Request timeout"
+        }
+    except requests.exceptions.ConnectionError:
+        print("❌ [OTP] Cannot connect to Node.js backend")
+        return {
+            "success": False,
+            "error": "Backend connection failed"
+        }
+    except Exception as e:
+        print(f"❌ [OTP] Unexpected error: {e}")
+        return {
+            "success": False,
+            "error": f"Unexpected error: {str(e)}"
+        }
+
+def format_otp_for_speech(otp: str) -> str:
+    """
+    Format OTP for clear speech synthesis
+    
+    Args:
+        otp: The OTP string (e.g., "123456")
+    
+    Returns:
+        str: Formatted OTP for speech (e.g., "1 2 3 4 5 6")
+    """
+    if not otp:
+        return ""
+    
+    # Remove any non-digit characters
+    clean_otp = re.sub(r'\D', '', str(otp))
+    
+    # Add spaces between digits for clear pronunciation
+    return " ".join(clean_otp)
+
 def clean_location_text(raw_text: str) -> str:
     """Removes filler words from a spoken location for better geocoding."""
     cleaned = raw_text.lower()
@@ -111,17 +205,45 @@ def format_number_for_speech(number_string: str):
     return " ".join([ch for ch in number_string if ch.isdigit()])
 
 def detect_user_intent(message: str):
+    """Enhanced intent detection with better OTP recognition"""
     message_lower = message.lower().strip()
     message_cleaned = re.sub(r'[.!?]', '', message_lower)
-    if any(k in message_lower for k in ["road", "nagar", "colony", "market", "station", "gate", "circle", "apartment", "complex", "mall", "near", "opposite", "metro", "bus stop"]): return "providing_location"
-    if any(k in message_lower for k in ['otp', 'one time password', 'code']): return "requesting_otp"
-    if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart"]): return "initial_delivery"
-    if any(k in message_lower for k in ["it's fine", "it's ok", 'ask him to call', 'just call me back']): return "non_urgent_callback"
-    if any(k in message_lower for k in ['same number', 'this number', "number i'm calling from"]): return "provide_self_number"
-    if any(k in message_lower for k in ['call back', 'callback', 'call me back']): return "requesting_callback"
-    if message_cleaned in ['yes', 'yeah', 'yep', 'ok', 'okay', 'sure', 'correct']: return "general_yes"
-    if message_cleaned in ['no', 'nope', 'not really']: return "declining"
-    if any(k in message_lower for k in ['thank', 'bye', 'thanks']): return "ending_conversation"
+    
+    # Enhanced OTP detection patterns
+    otp_patterns = [
+        'otp', 'one time password', 'code', 'verification code', 
+        'pin', 'security code', 'auth code', 'login code',
+        'give me the code', 'what is the code', 'tell me the otp',
+        'need the otp', 'share the otp', 'provide otp'
+    ]
+    
+    if any(pattern in message_lower for pattern in otp_patterns):
+        return "requesting_otp"
+    
+    # Check for company + OTP context
+    company_keywords = ['amazon', 'flipkart', 'myntra', 'zomato', 'swiggy', 'delivery']
+    if (any(company in message_lower for company in company_keywords) and 
+        any(otp in message_lower for otp in ['code', 'otp', 'pin'])):
+        return "requesting_otp"
+    
+    # Rest of existing intent detection logic
+    if any(k in message_lower for k in ["road", "nagar", "colony", "market", "station", "gate", "circle", "apartment", "complex", "mall", "near", "opposite", "metro", "bus stop"]): 
+        return "providing_location"
+    if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart"]): 
+        return "initial_delivery"
+    if any(k in message_lower for k in ["it's fine", "it's ok", 'ask him to call', 'just call me back']): 
+        return "non_urgent_callback"
+    if any(k in message_lower for k in ['same number', 'this number', "number i'm calling from"]): 
+        return "provide_self_number"
+    if any(k in message_lower for k in ['call back', 'callback', 'call me back']): 
+        return "requesting_callback"
+    if message_cleaned in ['yes', 'yeah', 'yep', 'ok', 'okay', 'sure', 'correct']: 
+        return "general_yes"
+    if message_cleaned in ['no', 'nope', 'not really']: 
+        return "declining"
+    if any(k in message_lower for k in ['thank', 'bye', 'thanks']): 
+        return "ending_conversation"
+    
     return "general"
 
 def extract_information_with_openai(message, collected_info):
@@ -184,7 +306,87 @@ Examples:
     except Exception as e:
         print(f"❌ [INFO EXTRACTION ERROR] {e}")
         return {}
+
+def handle_otp_request_logic(message: str, stage: str, collected_info: dict):
+    """
+    Handle OTP requests integrated with existing delivery logic
     
+    Args:
+        message: User's message
+        stage: Current conversation stage
+        collected_info: Information collected so far (including firebaseUid)
+    
+    Returns:
+        tuple: (response_text, new_stage, updated_info, action)
+    """
+    intent = detect_user_intent(message)
+    action = {}
+    
+    print(f"🔐 [OTP LOGIC] Stage: {stage}, Intent: {intent}")
+    print(f"🔐 [OTP LOGIC] Collected info: {collected_info}")
+    
+    # If user is asking for OTP
+    if intent == "requesting_otp" or stage == "providing_otp":
+        firebase_uid = collected_info.get('firebaseUid')
+        company = collected_info.get('company')
+        order_id = collected_info.get('order_id')
+        
+        if not firebase_uid:
+            return "I need to identify you first. Please hold while I get your information.", "need_firebase_uid", collected_info, action
+        
+        if not company:
+            return "Which company is this OTP request for?", "asking_otp_company", collected_info, action
+            
+        if not order_id:
+            # Try to find order_id from ORDER_WALLET based on company
+            found_order = None
+            for oid, order_data in ORDER_WALLET.items():
+                if (order_data.get("company", "").lower() == company.lower() and 
+                    order_data.get("status") == "approved"):
+                    found_order = oid
+                    break
+            
+            if found_order:
+                collected_info['order_id'] = found_order
+                order_id = found_order
+            else:
+                return f"I need the order ID for the {company} delivery. Can you provide it?", "asking_order_id", collected_info, action
+        
+        # Now we have all required info - fetch OTP
+        otp_result = fetch_otp_from_backend(firebase_uid, company, order_id)
+        
+        if otp_result["success"]:
+            formatted_otp = format_otp_for_speech(otp_result["otp"])
+            response_text = f"Here's your OTP for {company}: {formatted_otp}"
+            
+            # Mark order as completed in local wallet
+            if order_id in ORDER_WALLET:
+                ORDER_WALLET[order_id]["status"] = "completed"
+            
+            return response_text, "otp_provided", collected_info, action
+        else:
+            error_msg = otp_result.get("error", "Unknown error")
+            return f"Sorry, I couldn't retrieve the OTP. {error_msg}", "otp_error", collected_info, action
+    
+    # Handle responses to our questions
+    if stage == "asking_otp_company":
+        extracted_info = extract_information_with_openai(message, collected_info)
+        company = extracted_info.get("company") or message.strip().title()
+        collected_info["company"] = company
+        
+        # Try again with the company info
+        return handle_otp_request_logic("get otp", "providing_otp", collected_info)
+    
+    if stage == "asking_order_id":
+        # Extract order ID from message
+        order_id = message.strip()
+        collected_info["order_id"] = order_id
+        
+        # Try again with order ID
+        return handle_otp_request_logic("get otp", "providing_otp", collected_info)
+    
+    return "I can help you get an OTP. Which company is this for?", "asking_otp_company", collected_info, action
+
 # --- GOOGLE MAPS FUNCTIONS (OPTIMIZED) ---
 def enhance_search_query_with_ai(query):
     """Use OpenAI to dynamically enhance search queries with context."""
@@ -429,178 +631,282 @@ def handle_unknown_logic(message: str, stage: str, collected_info: dict, caller_
 
     return "Thank you. I'll make sure Ruchit gets the message.", "end_of_call", collected_info, action
 
-# --- DELIVERY LOGIC ---
+# --- ENHANCED DELIVERY LOGIC WITH OTP INTEGRATION ---
 def handle_delivery_logic(message: str, stage: str, collected_info: dict, caller_id=None):
     """
-    Handles delivery verification with two notification scenarios:
-    Case 1: Delivery person doesn't have tracking ID
-    Case 2: OTP message from company doesn't contain tracking ID
+    Enhanced delivery logic with proper conversational flow:
+    1. "How may I assist?" 
+    2. Caller: "I have delivery from Amazon"
+    3. AI: "Do you need help getting here or are you here?"
+    4. If help needed -> provide directions
+    5. When reached -> "Do you need OTP?"
     """
     intent = detect_user_intent(message)
     action = {}
+    
     print(f"\n--- [DELIVERY LOGIC] START ---")
     print(f"--- [DELIVERY LOGIC] Stage: {stage}, Intent: {intent} ---")
     print(f"--- [DELIVERY LOGIC] Message: '{message}' ---")
     print(f"--- [DELIVERY LOGIC] Current collected_info: {collected_info} ---")
-
+    
     # Handle OTP requests at any stage
     if intent == "requesting_otp":
-        company = collected_info.get("company")
-        if not company:
-            return "To get an OTP, please first tell me which company you are from.", "asked_for_company", collected_info, action
-
-        # Find the order for the company
-        order_id, order_data = None, None
-        for id, data in ORDER_WALLET.items():
-            if data.get("company") == company and data.get("status") == "pending":
-                order_id, order_data = id, data
-                break
-        
-        if not order_data:
-            return f"I don't have a pending order from {company} that needs an OTP.", "end_of_call", collected_info, action
-
-        collected_info['order_id'] = order_id
-        
-        # Branch to the correct verification method
-        if order_data.get("tracking_id"):
-            return f"Okay, to get the OTP for {company}, please provide the tracking ID.", "awaiting_tracking_id", collected_info, action
-        else:
-            # Push notification for approval
-            approval_token = str(uuid.uuid4())
-            ORDER_WALLET[order_id]['approval_token'] = approval_token
-            
-            if OWNER_PHONE_NUMBER and INTERNAL_API_KEY:
-                notification_sent = send_push_notification(
-                    OWNER_PHONE_NUMBER, 
-                    f"Delivery from {company} requesting OTP. Click to approve or deny.",
-                    approval_token
-                )
-                if notification_sent:
-                    return "I've sent a notification to the owner for approval. Please hold.", "awaiting_approval", collected_info, action
-            
-            # Fallback
-            approval_link = f"{BASE_URL}/approve-order?token={approval_token}"
-            print(f"🔗 [FALLBACK] Web approval link: {approval_link}")
-            return "I need owner approval, but the notification system isn't available.", "end_of_call", collected_info, action
-
-    # Stage 1: Initial delivery call
+        return handle_otp_request_logic(message, stage, collected_info)
+    
+    # Check if we're in an OTP-specific flow
+    if stage in ["asking_otp_company", "asking_order_id", "providing_otp", "otp_provided"]:
+        return handle_otp_request_logic(message, stage, collected_info)
+    
+    # Stage 1: Initial greeting - "How may I assist?"
     if stage == "start":
-        print("--- [DELIVERY LOGIC] Processing initial delivery message ---")
-        extracted_info = extract_information_with_openai(message, collected_info)
-        print(f"--- [DELIVERY LOGIC] Extracted info: {extracted_info} ---")
+        print("--- [DELIVERY LOGIC] Initial greeting stage ---")
         
-        collected_info.update(extracted_info)
-        company = collected_info.get("company")
-        print(f"--- [DELIVERY LOGIC] Company: '{company}' ---")
-        
-        if not company:
-            print("--- [DELIVERY LOGIC] No company found, asking for company ---")
-            return "Hi, which company is this delivery from?", "asked_for_company", collected_info, action
-
-        # Find pending order for this company
-        pending_order = next((data for id, data in ORDER_WALLET.items() 
-                            if data.get("company", "").lower() == company.lower() and data.get("status") == "pending"), None)
-
-        if not pending_order:
-            print(f"--- [DELIVERY LOGIC] No pending orders for '{company}' ---")
-            return f"I don't have any pending orders from {company} right now. Please check with the sender.", "end_of_call", collected_info, action
-
-        # Store order ID
-        order_id = next(id for id, data in ORDER_WALLET.items() if data is pending_order)
-        collected_info['order_id'] = order_id
-        print(f"--- [DELIVERY LOGIC] Found pending order: {order_id} ---")
-
-        # Check if OTP message has tracking ID (Case 2)
-        if not pending_order.get("tracking_id"):
-            print("--- [DELIVERY LOGIC] CASE 2: OTP message has no tracking ID - sending notification ---")
-            return send_approval_notification(order_id, company, collected_info)
+        # Check if this is already a delivery message
+        if intent == "initial_delivery" or any(k in message.lower() for k in ["delivery", "parcel", "package"]):
+            # Extract company information
+            extracted_info = extract_information_with_openai(message, collected_info)
+            collected_info.update(extracted_info)
+            company = collected_info.get("company")
+            
+            if company:
+                # Move to asking if they need directions
+                print(f"--- [DELIVERY LOGIC] Company '{company}' identified, asking for location help ---")
+                return f"Hi! I see you have a delivery from {company}. Do you need help getting here, or are you already here?", "asking_location_help", collected_info, action
+            else:
+                # Ask for company first
+                return "Hi! I can help with your delivery. Which company is this delivery from?", "asking_company_first", collected_info, action
         else:
-            print("--- [DELIVERY LOGIC] OTP message has tracking ID - asking delivery person ---")
-            return f"I have an order from {company}. Do you have the tracking ID?", "checking_tracking_availability", collected_info, action
-
-    # Stage 2: Handle company name collection
-    if stage == "asked_for_company":
-        print("--- [DELIVERY LOGIC] Processing company name response ---")
+            # Generic greeting
+            return "Hi! How may I assist you today?", "initial_greeting", collected_info, action
+    
+    # Stage 2: After initial greeting, waiting for delivery mention
+    if stage == "initial_greeting":
+        if intent == "initial_delivery" or any(k in message.lower() for k in ["delivery", "parcel", "package"]):
+            extracted_info = extract_information_with_openai(message, collected_info)
+            collected_info.update(extracted_info)
+            company = collected_info.get("company")
+            
+            if company:
+                return f"I see you have a delivery from {company}. Do you need help getting here, or are you already here?", "asking_location_help", collected_info, action
+            else:
+                return "I can help with your delivery. Which company is this from?", "asking_company_first", collected_info, action
+        else:
+            # Not a delivery call, handle as unknown caller
+            return handle_unknown_logic(message, "start", collected_info, caller_id)
+    
+    # Stage 3: Asked for company name first
+    if stage == "asking_company_first":
         extracted_info = extract_information_with_openai(message, collected_info)
-        company = extracted_info.get("company")
-        
-        if not company:
-            company = message.replace('.', '').strip().title()
-        
+        company = extracted_info.get("company") or message.strip().title()
         collected_info["company"] = company
         
-        # Find pending order
-        pending_order = next((data for id, data in ORDER_WALLET.items() 
-                            if data.get("company", "").lower() == company.lower() and data.get("status") == "pending"), None)
-
-        if not pending_order:
-            return f"I don't have any pending orders from {company} right now.", "end_of_call", collected_info, action
-
-        order_id = next(id for id, data in ORDER_WALLET.items() if data is pending_order)
-        collected_info['order_id'] = order_id
-
-        # Check tracking ID availability
-        if not pending_order.get("tracking_id"):
-            print("--- [DELIVERY LOGIC] CASE 2: OTP message has no tracking ID - sending notification ---")
-            return send_approval_notification(order_id, company, collected_info)
+        return f"Thank you! So you have a delivery from {company}. Do you need help getting here, or are you already here?", "asking_location_help", collected_info, action
+    
+    # Stage 4: Asking if they need location help
+    if stage == "asking_location_help":
+        print("--- [DELIVERY LOGIC] Processing location help response ---")
+        
+        # Check their response
+        message_lower = message.lower().strip()
+        
+        # They need help with directions
+        if any(phrase in message_lower for phrase in ["need help", "help", "directions", "how to get", "where is", "guide me", "lost"]):
+            return "I'd be happy to help guide you here. What's your current location or a nearby landmark?", "getting_current_location", collected_info, action
+        
+        # They're already here / at location
+        elif any(phrase in message_lower for phrase in ["here", "arrived", "at the location", "reached", "outside", "at your place", "at the door"]):
+            print("--- [DELIVERY LOGIC] Caller says they're here, checking for OTP need ---")
+            return handle_arrival_and_otp_check(collected_info)
+        
+        # Ambiguous response, clarify
         else:
-            return f"I have an order from {company}. Do you have the tracking ID?", "checking_tracking_availability", collected_info, action
+            return "Are you asking for directions to get here, or have you already arrived at the location?", "asking_location_help", collected_info, action
+    
+    # Stage 5: Getting their current location for directions
+    if stage == "getting_current_location":
+        print("--- [DELIVERY LOGIC] Processing current location for directions ---")
+        
+        # Try to geocode their location
+        geocode_results = geocode_with_google(message)
+        
+        if geocode_results and len(geocode_results) > 0:
+            best_result = geocode_results[0]
+            collected_info['current_location'] = best_result
+            
+            # Get directions
+            directions = get_directions_from_google(best_result)
+            eta = get_estimated_arrival_time(best_result)
+            
+            if directions:
+                response_parts = [
+                    f"I found your location: {best_result['place_name']}.",
+                    f"Here are the directions: {directions}"
+                ]
+                
+                if eta:
+                    response_parts.append(eta)
+                
+                response_parts.append("Let me know when you arrive!")
+                
+                response_text = " ".join(response_parts)
+                return response_text, "traveling_to_location", collected_info, action
+            else:
+                return f"I found your location: {best_result['place_name']}, but I couldn't get detailed directions. Please use your GPS to navigate to the delivery address. Let me know when you arrive!", "traveling_to_location", collected_info, action
+        else:
+            return "I couldn't find that location. Could you try a more specific address or nearby landmark?", "getting_current_location", collected_info, action
+    
+    # Stage 6: They're traveling, waiting for arrival
+    if stage == "traveling_to_location":
+        message_lower = message.lower().strip()
+        
+        # Check if they've arrived
+        if any(phrase in message_lower for phrase in ["arrived", "here", "reached", "at the location", "outside", "at your place", "at the door"]):
+            print("--- [DELIVERY LOGIC] Caller has arrived, checking for OTP ---")
+            return handle_arrival_and_otp_check(collected_info)
+        
+        # They're asking for more help
+        elif any(phrase in message_lower for phrase in ["lost", "can't find", "help", "confused", "where"]):
+            return "What landmarks can you see around you? I can help guide you from there.", "getting_current_location", collected_info, action
+        
+        # General response while they're traveling
+        else:
+            return "Let me know when you reach the location!", "traveling_to_location", collected_info, action
+    
+    # Handle the rest of the existing delivery logic for OTP verification
+    return handle_existing_delivery_logic(message, stage, collected_info, intent, action)
 
-    # Stage 3: Check if delivery person has tracking ID
+def handle_arrival_and_otp_check(collected_info):
+    """Handle when delivery person arrives and check if they need OTP"""
+    print("--- [DELIVERY LOGIC] Handling arrival and OTP check ---")
+    
+    company = collected_info.get("company")
+    if not company:
+        return "Great! You're here. Which company is this delivery from?", "asking_company_for_otp", {}, {}
+    
+    # Check if we have a pending order for this company
+    pending_order = None
+    order_id = None
+    
+    for oid, order_data in ORDER_WALLET.items():
+        if (order_data.get("company", "").lower() == company.lower() and 
+            order_data.get("status") == "pending"):
+            pending_order = order_data
+            order_id = oid
+            break
+    
+    if not pending_order:
+        return f"Perfect! You're here with the {company} delivery. However, I don't have any pending orders from {company} right now. Please check with the sender.", "end_of_call", collected_info, {}
+    
+    # Store order ID
+    collected_info['order_id'] = order_id
+    
+    # Ask if they need OTP
+    return f"Excellent! You've reached the location with your {company} delivery. Do you need the OTP?", "asking_if_otp_needed", collected_info, {}
+
+def handle_existing_delivery_logic(message, stage, collected_info, intent, action):
+    """Handle the existing delivery logic for OTP verification"""
+    
+    # Stage: Asking if they need OTP
+    if stage == "asking_if_otp_needed":
+        message_lower = message.lower().strip()
+        
+        if any(phrase in message_lower for phrase in ["yes", "yeah", "yep", "need", "otp", "code"]):
+            # They need OTP, proceed with verification
+            company = collected_info.get("company")
+            order_id = collected_info.get("order_id")
+            order = ORDER_WALLET.get(order_id) if order_id else None
+            
+            if order and order.get("tracking_id"):
+                return f"I have the order ready. Do you have the tracking ID for the {company} delivery?", "checking_tracking_availability", collected_info, action
+            else:
+                # No tracking ID in order, send approval notification
+                return send_approval_notification(order_id, company, collected_info)
+        
+        elif any(phrase in message_lower for phrase in ["no", "nope", "don't need", "not needed"]):
+            return "Alright! Have a great day and safe delivery!", "end_of_call", collected_info, action
+        else:
+            return "Do you need me to provide the OTP for this delivery? Please say yes or no.", "asking_if_otp_needed", collected_info, action
+    
+    # Stage: Asked for company name for OTP
+    if stage == "asking_company_for_otp":
+        extracted_info = extract_information_with_openai(message, collected_info)
+        company = extracted_info.get("company") or message.strip().title()
+        collected_info["company"] = company
+        
+        return handle_arrival_and_otp_check(collected_info)
+    
+    # All the existing stages for OTP verification
     if stage == "checking_tracking_availability":
-        print("--- [DELIVERY LOGIC] Delivery person response about having tracking ID ---")
         if intent == "general_yes":
-            print("--- [DELIVERY LOGIC] Delivery person has tracking ID - requesting it ---")
             return "Please provide the tracking ID for verification.", "awaiting_tracking_id", collected_info, action
         elif intent == "declining":
-            print("--- [DELIVERY LOGIC] CASE 1: Delivery person doesn't have tracking ID - sending notification ---")
             order_id = collected_info.get('order_id')
             company = collected_info.get('company')
             return send_approval_notification(order_id, company, collected_info)
         else:
             return "Do you have the tracking ID? Please say yes or no.", "checking_tracking_availability", collected_info, action
 
-    # Stage 4: Verify tracking ID
     if stage == "awaiting_tracking_id":
-        print("--- [DELIVERY LOGIC] Verifying provided tracking ID ---")
         provided_tracking_id = message.replace(" ", "").upper()
         order_id = collected_info.get('order_id')
         order = ORDER_WALLET.get(order_id)
 
         if order and order.get("tracking_id") == provided_tracking_id:
-            otp = order.get("otp")
-            company = order.get("company")
-            ORDER_WALLET.pop(order_id, None)
-            print(f"--- [DELIVERY LOGIC] Tracking verified, releasing OTP: {otp} ---")
-            return f"Tracking ID verified. Your OTP is: {otp}. Thank you!", "end_of_call", collected_info, action
+            # Use backend OTP system
+            firebase_uid = collected_info.get('firebaseUid')
+            company = collected_info.get('company')
+            
+            if firebase_uid and company and order_id:
+                otp_result = fetch_otp_from_backend(firebase_uid, company, order_id)
+                
+                if otp_result["success"]:
+                    formatted_otp = format_otp_for_speech(otp_result["otp"])
+                    response_text = f"Tracking ID verified. Here's your OTP: {formatted_otp}"
+                    ORDER_WALLET[order_id]["status"] = "completed"
+                    return response_text, "end_of_call", collected_info, action
+                else:
+                    return f"Tracking verified, but I couldn't retrieve the OTP. {otp_result.get('error', 'Please try again.')}", "end_of_call", collected_info, action
+            else:
+                action = {"type": "PROVIDE_OTP"} 
+                return "Tracking ID verified. One moment.", "end_of_call", collected_info, action
         else:
-            print("--- [DELIVERY LOGIC] Tracking verification failed ---")
             return "That tracking ID doesn't match. Please check and try again.", "awaiting_tracking_id", collected_info, action
 
-    # Stage 5: Waiting for push notification approval
     if stage == "awaiting_approval":
-        print("--- [DELIVERY LOGIC] Checking if notification was approved ---")
         order_id = collected_info.get('order_id')
         order = ORDER_WALLET.get(order_id)
         
         if order and order.get("status") == "approved":
-            otp = order.get("otp")
-            company = order.get("company")
-            ORDER_WALLET.pop(order_id, None)
-            print(f"--- [DELIVERY LOGIC] Notification approved, releasing OTP: {otp} ---")
-            return f"Delivery approved! Your OTP is: {otp}. Thank you!", "end_of_call", collected_info, action
+            firebase_uid = collected_info.get('firebaseUid')
+            company = collected_info.get('company')
+            
+            if firebase_uid and company and order_id:
+                otp_result = fetch_otp_from_backend(firebase_uid, company, order_id)
+                
+                if otp_result["success"]:
+                    formatted_otp = format_otp_for_speech(otp_result["otp"])
+                    response_text = f"Delivery approved. Here's your OTP: {formatted_otp}"
+                    ORDER_WALLET[order_id]["status"] = "completed"
+                    return response_text, "end_of_call", collected_info, action
+                else:
+                    return f"Delivery approved, but I couldn't retrieve the OTP. {otp_result.get('error', 'Please try again.')}", "end_of_call", collected_info, action
+            else:
+                action = {"type": "PROVIDE_OTP"}
+                return "Delivery approved. One moment, please.", "end_of_call", collected_info, action
+                
         elif order and order.get("status") == "denied":
             ORDER_WALLET.pop(order_id, None)
             return "The delivery was denied. Please contact the sender.", "end_of_call", collected_info, action
         else:
-            return "Still waiting for approval. Please hold on.", "awaiting_approval", collected_info, action
+            if order_id in ORDER_WALLET:
+                ORDER_WALLET.pop(order_id, None)
+            return "I'm still waiting for approval. Please call back in a moment.", "end_of_call", collected_info, action
 
     # Handle conversation ending
     if intent == "ending_conversation":
         return "You're welcome! Have a safe delivery!", "end_of_call", collected_info, action
             
     # Fallback
-    return "Which company is this delivery from?", "asked_for_company", collected_info, action
 
 def send_approval_notification(order_id, company, collected_info):
     """Helper function to send approval notification and return response"""
@@ -629,23 +935,43 @@ def send_approval_notification(order_id, company, collected_info):
     return "I need to get approval but the notification system isn't available. Please try again later.", "end_of_call", collected_info, action
 
 # --- MAIN ROUTES ---
+
 @app.route("/generate", methods=["POST"])
 def generate():
+    """
+    Main endpoint that handles both delivery logic and OTP requests
+    """
     try:
         data = request.get_json(force=True)
-        new_message, caller_role = data.get("new_message", "").strip(), data.get("caller_role", "unknown")
-        history, stage = data.get("history", []) or [], data.get("conversation_stage", "start")
-        collected_info, caller_id = data.get("collected_info", {}) or {}, data.get("caller_id")
+        new_message = data.get("new_message", "").strip()
+        caller_role = data.get("caller_role", "unknown")
+        history = data.get("history", []) or []
+        stage = data.get("conversation_stage", "start")
+        
+        # Extract firebaseUid from the request
+        collected_info = data.get("collected_info", {}) or {}
+        firebase_uid = data.get("firebaseUid")
+        
+        # Add it to collected_info to keep it with the conversation
+        if firebase_uid:
+            collected_info['firebaseUid'] = firebase_uid
         
         if not new_message: 
             return jsonify({"error": "'new_message' is required"}), 400
         
+        # Handle delivery calls with integrated OTP functionality
         if caller_role == "delivery": 
             response_text, new_stage, updated_info, action = handle_delivery_logic(new_message, stage, collected_info)
         else: 
+            caller_id = data.get("caller_id")
             response_text, new_stage, updated_info, action = handle_unknown_logic(new_message, stage, collected_info, caller_id)
         
         intent = detect_user_intent(new_message)
+       
+        # If the action type is PROVIDE_OTP, update the intent
+        if action.get("type") == "PROVIDE_OTP":
+            intent = "provide_otp"
+
         updated_history = history + [{"role": "user", "parts": [new_message]}, {"role": "model", "parts": [response_text]}]
         
         print(f"🎯 Role={caller_role} | Intent={intent} | Stage: {stage} -> {new_stage}")
@@ -656,13 +982,61 @@ def generate():
             "intent": intent, 
             "stage": new_stage, 
             "collected_info": updated_info, 
-            "action": action
+            "action": action 
         })
         
     except Exception as e:
         print(f"❌ [GENERATE ERROR] {e}")
         return jsonify({"error": "Internal server error"}), 500
 
+@app.route("/api/get-otp", methods=["POST"])
+def get_otp_direct():
+    """
+    Direct OTP endpoint that your Node.js can call when it detects
+    the AI response has intent: "provide_otp"
+    """
+    try:
+        data = request.get_json()
+        
+        firebase_uid = data.get("firebaseUid")
+        company = data.get("company")
+        order_id = data.get("orderId")
+        
+        if not all([firebase_uid, company, order_id]):
+            return jsonify({
+                "success": False,
+                "error": "Missing required parameters: firebaseUid, company, orderId"
+            }), 400
+        
+        print(f"📱 [DIRECT OTP] Request for {company} order {order_id}")
+        
+        # Fetch OTP from your Node.js backend
+        otp_result = fetch_otp_from_backend(firebase_uid, company, order_id)
+        
+        if otp_result["success"]:
+            formatted_otp = format_otp_for_speech(otp_result["otp"])
+            
+            return jsonify({
+                "success": True,
+                "otp": otp_result["otp"],
+                "formatted_otp": formatted_otp,
+                "speech_text": f"Here's your OTP for {company}: {formatted_otp}"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": otp_result.get("error", "Could not retrieve OTP"),
+                "speech_text": f"Sorry, I couldn't get the OTP for {company}. Please try again."
+            })
+        
+    except Exception as e:
+        print(f"❌ [DIRECT OTP ERROR] {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "speech_text": "I'm having trouble getting your OTP right now."
+        }), 500
+    
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
@@ -809,3 +1183,4 @@ if __name__ == "__main__":
     print(f"📱 Node.js Backend: {NODEJS_BACKEND_URL}")
     print(f"🔐 Notification System: {'✅' if INTERNAL_API_KEY and OWNER_PHONE_NUMBER else '❌'}")
     app.run(port=5001, debug=True)
+  
