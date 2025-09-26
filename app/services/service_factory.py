@@ -10,6 +10,7 @@ class ServiceFactory:
         self._openai_service = None
         self._maps_service = None
         self._otp_service = None
+        self._notification_service = None
     
     @property
     def openai_service(self):
@@ -38,6 +39,15 @@ class ServiceFactory:
         return self._maps_service
     
     @property
+    def notification_service(self):
+        """Get Notification service (always real - no mock needed)"""
+        if self._notification_service is None:
+            from app.services.notification_service import NotificationService
+            self._notification_service = NotificationService(self.config)
+        
+        return self._notification_service
+    
+    @property
     def otp_service(self):
         """Get OTP service (real or mock based on configuration)"""
         if self._otp_service is None:
@@ -55,6 +65,7 @@ class ServiceFactory:
         self._openai_service = None
         self._maps_service = None
         self._otp_service = None
+        self._notification_service = None
     
     def get_service_status(self):
         """Get status of all services for debugging"""
@@ -63,6 +74,7 @@ class ServiceFactory:
             'openai_service': type(self.openai_service).__name__,
             'maps_service': type(self.maps_service).__name__,
             'otp_service': type(self.otp_service).__name__,
+            'notification_service': type(self.notification_service).__name__,
             'config': {
                 'mock_mode': self.config.MOCK_MODE,
                 'has_openai_key': bool(getattr(self.config, 'OPENAI_API_KEY', None)),

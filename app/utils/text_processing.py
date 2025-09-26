@@ -10,6 +10,47 @@ def clean_location_text(raw_text: str) -> str:
     cleaned = re.sub(r"^(i(\s*am|'m)?\s*(here\s*)?(in|at|near)\s+)", "", cleaned)
     return cleaned.strip().title()
 
+def extract_phone_number(message: str) -> Optional[str]:
+    """Extract phone number from various spoken formats"""
+    if not message:
+        return None
+    
+    # Remove common words and clean the message
+    cleaned = re.sub(r'\b(call|me|on|at|number|is|my)\b', ' ', message.lower())
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    
+    # Patterns to match different phone number formats
+    patterns = [
+        # US/International format: (965) 060-6105
+        r'\(?(\d{3})\)?[-.\s]*(\d{3})[-.\s]*(\d{4})',
+        # Indian format: +91 9876543210
+        r'\+?91[-.\s]*(\d{10})',
+        # 10 digit: 9876543210
+        r'(\d{10})',
+        # Spoken format: nine six five zero six zero six one zero five
+        r'(\d{3}[-.\s]*\d{3}[-.\s]*\d{4})',
+        # Various other formats
+        r'(\d{4}[-.\s]*\d{3}[-.\s]*\d{3})',
+        r'(\d{2}[-.\s]*\d{4}[-.\s]*\d{4})',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if match:
+            if len(match.groups()) == 3:  # Three-part number like (965) 060-6105
+                phone = match.group(1) + match.group(2) + match.group(3)
+            else:
+                phone = match.group(1)
+            
+            # Clean up the phone number - remove all non-digits except +
+            phone = re.sub(r'[^\d+]', '', phone)
+            
+            # Validate length
+            if len(phone) >= 10:
+                return phone
+    
+    return None
+
 def format_phone_number(number_string: str):
     """Format phone number for Indian numbers (matches original logic)"""
     if not isinstance(number_string, str): 

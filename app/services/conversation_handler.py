@@ -16,9 +16,28 @@ class ConversationHandler:
         self.openai_service = self.service_factory.openai_service
         self.maps_service = self.service_factory.maps_service
         self.otp_service = self.service_factory.otp_service
+        self.notification_service = self.service_factory.notification_service
         
         # ORDER_WALLET equivalent - stores pending orders
         self.order_wallet = {}
+    
+    def identify_caller_role(self, message: str) -> str:
+        """Identify if the caller is delivery person or unknown (matches original.py logic)"""
+        message_lower = message.lower().strip()
+        
+        # Check for delivery-related keywords
+        delivery_keywords = [
+            'delivery', 'parcel', 'package', 'amazon', 'flipkart', 
+            'swiggy', 'zomato', 'zepto', 'bluedart', 'myntra',
+            'courier', 'order', 'shipped'
+        ]
+        
+        # If the message contains delivery keywords, it's likely a delivery person
+        if any(keyword in message_lower for keyword in delivery_keywords):
+            return 'delivery'
+        
+        # Otherwise, treat as unknown caller
+        return 'unknown'
     
     def handle_delivery_logic(self, message: str, stage: str, collected_info: Dict[str, Any], caller_id=None) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
         """
@@ -310,7 +329,12 @@ class ConversationHandler:
         if any(k in message.lower() for k in ['urgent', 'asap', 'emergency']):
             name_to_use = collected_info.get("name", "An unknown caller")
             response_text = "Okay, I understand this is urgent. I am notifying Ruchit immediately."
-            action = {"type": "URGENT_NOTIFICATION", "message": f"Urgent call from {name_to_use}."}
+            
+            # Send urgent notification
+            urgent_message = f"Urgent call from {name_to_use}."
+            self.notification_service.send_urgent_notification(urgent_message)
+            
+            action = {"type": "URGENT_NOTIFICATION", "message": urgent_message}
             return response_text, "end_of_call", collected_info, action
 
         intent = detect_user_intent(message)
@@ -320,7 +344,11 @@ class ConversationHandler:
             return "May I know who's calling?", "asking_name", collected_info, action
 
         if stage == "collecting_contact" and intent == "provide_self_number":
-            collected_info['phone'] = "Caller's Number"
+            collected_info['phone'] = caller_id or "Caller's Number"
+            
+            # Send notification to owner about the unknown caller
+            self.notification_service.send_unknown_caller_notification(collected_info)
+            
             return "Okay, noted. Ruchit will call you back on the number you are calling from. Thank you!", "end_of_call", collected_info, action
 
         extracted_info = self.extract_information_with_ai(message, collected_info)
@@ -328,31 +356,106 @@ class ConversationHandler:
 
         if stage == "asking_name":
             if collected_info.get("name"):
-                return f"Hi {collected_info['name']}! And what is the reason for your call?", "asking_purpose", collected_info, action
+                name = collected_info['name']
+                return f"Hi {name}! And what is the reason for your call?", "asking_purpose", collected_info, action
             else:
+                # Try one more time with current message before giving up
+                if len(message.strip()) > 0:
+                    # If the message looks like it could be a name (not too long, has letters)
+                    potential_name = message.strip()
+                    if (len(potential_name) <= 20 and 
+                        any(c.isalpha() for c in potential_name) and
+                        potential_name.lower() not in ['yes', 'no', 'hello', 'hi']):
+                        # Accept it as a name
+                        collected_info["name"] = potential_name.title()
+                        return f"Hi {potential_name.title()}! And what is the reason for your call?", "asking_purpose", collected_info, action
+                
                 return "I'm sorry, I didn't catch your name. Could you please spell it out?", "asking_name", collected_info, action
 
         if stage == "asking_purpose":
             if not collected_info.get("purpose"):
                 collected_info["purpose"] = message
+            
+            # Use AI to determine if we need follow-up questions and what to ask
+            if not collected_info.get("followup_asked"):
+                ai_followup = self._get_ai_followup_questions(message, collected_info)
+                
+                if ai_followup.get("needs_followup"):
+                    collected_info["followup_asked"] = True
+                    collected_info["ai_followup_plan"] = ai_followup
+                    return ai_followup["first_question"], "asking_followup", collected_info, action
+            
+            # Continue with normal flow if no followup needed or already asked
             if not collected_info.get("phone"):
                 return "Got it. What's the best number for Ruchit to call you back on?", "collecting_contact", collected_info, action
             else:
                 phone_for_speech = format_number_for_speech(collected_info['phone'])
-                return f"Perfect, I have your number as {phone_for_speech}. I'll pass this all on to Ruchit. Thanks for calling!", "end_of_call", collected_info, action
+                
+                # Send notification to owner
+                self.notification_service.send_unknown_caller_notification(collected_info)
+                
+                return f"Perfect, I have your number as {phone_for_speech}. I'll make sure Ruchit gets all this information and calls you back. Have a great day!", "end_of_call", collected_info, action
+
+        # New stage for handling follow-up questions
+        if stage == "asking_followup":
+            # Store the additional information
+            if not collected_info.get("additional_details"):
+                collected_info["additional_details"] = []
+            collected_info["additional_details"].append(message)
+            
+            # Use AI to determine if we need a second question
+            followup_plan = collected_info.get("ai_followup_plan", {})
+            followup_count = len(collected_info.get("additional_details", []))
+            
+            if followup_count == 1 and followup_plan.get("second_question"):
+                return followup_plan["second_question"], "asking_second_followup", collected_info, action
+            else:
+                # Move to collecting contact info
+                if not collected_info.get("phone"):
+                    return "Thank you for those details. What's the best number for Ruchit to call you back on?", "collecting_contact", collected_info, action
+                else:
+                    phone_for_speech = format_number_for_speech(collected_info['phone'])
+                    
+                    # Send notification to owner
+                    self.notification_service.send_unknown_caller_notification(collected_info)
+                    
+                    return f"Perfect, I have your number as {phone_for_speech}. I'll make sure Ruchit gets all this information and calls you back. Have a great day!", "end_of_call", collected_info, action
+
+        # Handle second follow-up question
+        if stage == "asking_second_followup":
+            if not collected_info.get("additional_details"):
+                collected_info["additional_details"] = []
+            collected_info["additional_details"].append(message)
+            
+            if not collected_info.get("phone"):
+                return "Excellent, thank you for all that information. What's the best number for Ruchit to call you back on?", "collecting_contact", collected_info, action
+            else:
+                phone_for_speech = format_number_for_speech(collected_info['phone'])
+                
+                # Send notification to owner
+                self.notification_service.send_unknown_caller_notification(collected_info)
+                
+                return f"Perfect, I have your number as {phone_for_speech}. I'll make sure Ruchit gets all this detailed information and calls you back soon. Have a great day!", "end_of_call", collected_info, action
 
         if stage == "collecting_contact":
             if collected_info.get("phone"):
                 phone_for_speech = format_number_for_speech(collected_info['phone'])
-                return f"Great, I have your number as {phone_for_speech}. I'll pass this all on to Ruchit. Thanks for calling!", "end_of_call", collected_info, action
+                
+                # Send notification to owner
+                self.notification_service.send_unknown_caller_notification(collected_info)
+                
+                return f"Great, I have your number as {phone_for_speech}. I'll make sure Ruchit gets all this information and calls you back. Thank you for calling, and have a wonderful day!", "end_of_call", collected_info, action
             else:
                 return "I didn't quite catch that. Could you please provide a callback number?", "collecting_contact", collected_info, action
 
-        return "Thank you. I'll make sure Ruchit gets the message.", "end_of_call", collected_info, action
+        # Final fallback - send notification anyway if we have some info
+        if collected_info.get("name") or collected_info.get("purpose"):
+            self.notification_service.send_unknown_caller_notification(collected_info)
+
+        return "Thank you for calling. I'll make sure Ruchit gets your message. Have a great day!", "end_of_call", collected_info, action
     
     def extract_information_with_ai(self, message: str, collected_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract information using AI (mock implementation for now)"""
-        # This would use OpenAI in the real version, but we'll use simple extraction for demo
+        """Extract information using AI (enhanced implementation to handle mixed languages)"""
         extracted = {}
         
         message_lower = message.lower()
@@ -364,17 +467,177 @@ class ConversationHandler:
                 extracted["company"] = company.title()
                 break
         
-        # Extract names (simple pattern matching)
-        if any(phrase in message_lower for phrase in ["my name is", "i am", "this is"]):
+        # Enhanced name extraction with better patterns
+        name_patterns = [
+            # Direct patterns
+            r"my name is\s+([a-zA-Z\s]+)",
+            r"i am\s+([a-zA-Z\s]+)", 
+            r"this is\s+([a-zA-Z\s]+)",
+            r"i'm\s+([a-zA-Z\s]+)",
+            # Spelled out patterns
+            r"([a-z]\s+[a-z]\s+[a-z]\s+[a-z]\s+[a-z])",  # r u d r a
+            r"([a-z]\s+[a-z]\s+[a-z]\s+[a-z])",  # r u d r  
+            r"([a-z]\s+[a-z]\s+[a-z])",  # a b c
+            # Mixed language patterns
+            r"name is\s+([^\s,]+)",  # Captures non-English names
+            r"is\s+([^\s,\.]+)",  # Generic capture after "is"
+        ]
+        
+        import re
+        for pattern in name_patterns:
+            match = re.search(pattern, message_lower)
+            if match:
+                potential_name = match.group(1).strip()
+                
+                # Clean up spelled out names (r u d r a -> rudra)
+                if ' ' in potential_name and len(potential_name.split()) > 2:
+                    # Check if it's spelled out (single letters with spaces)
+                    parts = potential_name.split()
+                    if all(len(part) == 1 and part.isalpha() for part in parts):
+                        potential_name = ''.join(parts)
+                
+                # Filter out common words and very short/long names
+                if (potential_name and 
+                    len(potential_name) > 1 and 
+                    len(potential_name) < 20 and
+                    potential_name not in ['calling', 'talking', 'speaking', 'here', 'you', 'me']):
+                    extracted["name"] = potential_name.title()
+                    break
+        
+        # If still no name found, try to extract from non-English text
+        if not extracted.get("name"):
+            # Look for patterns like "रूद्रा" or similar
             words = message.split()
-            for i, word in enumerate(words):
-                if word.lower() in ["is", "am"] and i + 1 < len(words):
-                    potential_name = words[i + 1].strip()
-                    if potential_name.isalpha() and len(potential_name) > 1:
-                        extracted["name"] = potential_name.title()
-                        break
+            for word in words:
+                # Skip common English words
+                if (word not in ['my', 'name', 'is', 'this', 'i', 'am', 'the', 'a', 'an'] and
+                    len(word) > 1 and len(word) < 15):
+                    # Could be a name in another language
+                    extracted["name"] = word.strip('.,!?').title()
+                    break
+        
+        # Extract phone numbers using the improved utility function
+        from ..utils.text_processing import extract_phone_number
+        phone = extract_phone_number(message)
+        if phone:
+            extracted["phone"] = phone
         
         return extracted
+    
+    def _get_ai_followup_questions(self, purpose_message: str, collected_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Use AI to determine if follow-up questions are needed and what to ask"""
+        caller_name = collected_info.get("name", "the caller")
+        
+        # Use real OpenAI service if available
+        if hasattr(self.openai_service, 'client') and self.openai_service.client:
+            try:
+                prompt = f"""
+You are an AI assistant helping to screen calls for Ruchit Gupta. A caller named {caller_name} said their reason for calling is: "{purpose_message}"
+
+Your job is to determine if this call requires follow-up questions to gather important information that would help Ruchit prioritize and prepare for the callback.
+
+Analyze the purpose and respond with JSON in this format:
+{{
+    "needs_followup": true/false,
+    "importance_level": "high/medium/low",
+    "first_question": "What specific question should I ask first?",
+    "second_question": "What should I ask as a follow-up?" or null,
+    "reasoning": "Why these questions are important"
+}}
+
+Guidelines:
+- Ask follow-up questions for: business opportunities, investments, partnerships, sponsorships, collaborations, job opportunities, media requests, or anything that seems professionally important
+- DON'T ask follow-ups for: simple inquiries, personal calls, complaints, or basic questions
+- Focus on questions that would help Ruchit understand the opportunity, urgency, scale, or timeline
+- Keep questions natural and conversational
+- Maximum 2 follow-up questions
+
+Examples of good follow-up questions:
+- For sponsorship: "What type of sponsorship opportunity is this?" then "What's the budget range or scale you're considering?"
+- For business: "What kind of business opportunity are you proposing?" then "What timeline are you working with?"
+- For investment: "What type of investment are you looking to discuss?" then "What stage is your company/project at?"
+"""
+
+                response = self.openai_service.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=300
+                )
+                
+                import json
+                ai_response = json.loads(response.choices[0].message.content)
+                return ai_response
+                
+            except Exception as e:
+                print(f"⚠️ AI followup generation failed: {e}")
+                # Fall back to rule-based system
+        
+        # Fallback rule-based system (existing logic)
+        return self._get_rule_based_followup(purpose_message)
+    
+    def _get_rule_based_followup(self, purpose_message: str) -> Dict[str, Any]:
+        """Fallback rule-based follow-up question generation"""
+        purpose_lower = purpose_message.lower()
+        
+        # Determine if we need follow-up questions
+        business_keywords = [
+            'sponsorship', 'business', 'collaboration', 'partnership', 
+            'investment', 'project', 'proposal', 'meeting', 'interview',
+            'opportunity', 'deal', 'funding', 'venture', 'startup',
+            'media', 'press', 'journalist', 'article', 'feature'
+        ]
+        
+        needs_followup = any(keyword in purpose_lower for keyword in business_keywords)
+        
+        if not needs_followup:
+            return {
+                "needs_followup": False,
+                "importance_level": "low",
+                "reasoning": "Simple inquiry that doesn't require detailed follow-up"
+            }
+        
+        # Generate specific questions based on keywords
+        if 'sponsorship' in purpose_lower:
+            return {
+                "needs_followup": True,
+                "importance_level": "high",
+                "first_question": "I see you're interested in sponsorship. What type of sponsorship opportunity are you proposing?",
+                "second_question": "And what's the scale or budget range you're considering?",
+                "reasoning": "Sponsorship requires understanding of type and scale for proper evaluation"
+            }
+        elif any(word in purpose_lower for word in ['investment', 'funding', 'venture']):
+            return {
+                "needs_followup": True,
+                "importance_level": "high",
+                "first_question": "I understand this is about investment. What kind of investment opportunity are you proposing?",
+                "second_question": "What stage is your company or project currently at?",
+                "reasoning": "Investment opportunities need clarity on type and maturity stage"
+            }
+        elif any(word in purpose_lower for word in ['business', 'collaboration', 'partnership']):
+            return {
+                "needs_followup": True,
+                "importance_level": "medium",
+                "first_question": "That sounds interesting! Can you tell me more about the nature of this business opportunity?",
+                "second_question": "What timeline are you looking at for this collaboration?",
+                "reasoning": "Business opportunities need scope and timeline clarification"
+            }
+        elif any(word in purpose_lower for word in ['media', 'press', 'journalist', 'article']):
+            return {
+                "needs_followup": True,
+                "importance_level": "medium",
+                "first_question": "I see this is a media inquiry. What publication or outlet are you with?",
+                "second_question": "What's the focus or angle of the story you're working on?",
+                "reasoning": "Media requests need publication details and story context"
+            }
+        else:
+            return {
+                "needs_followup": True,
+                "importance_level": "medium",
+                "first_question": "That sounds important! Could you provide a bit more detail about what you'd like to discuss?",
+                "second_question": "What would be the best time frame for Ruchit to get back to you on this?",
+                "reasoning": "Professional inquiry needs more context and timing"
+            }
     
     def generate_conversation_summary(self, conversation_history: list, collected_info: Dict[str, Any] = None) -> str:
         """Generate a conversation summary (mock implementation)"""

@@ -26,6 +26,7 @@ def generate():
         
         collected_info = data.get("collected_info", {}) or {}
         firebase_uid = data.get("firebaseUid")
+        caller_id = data.get("caller_id")
         
         if firebase_uid:
             collected_info['firebaseUid'] = firebase_uid
@@ -33,16 +34,25 @@ def generate():
         if not new_message: 
             return jsonify({"error": "'new_message' is required"}), 400
         
-        # Handle conversation logic
+        # Auto-identify caller role if not provided or unknown (matches original.py logic)
+        if caller_role == "unknown" and stage == "start":
+            identified_role = conversation_handler.identify_caller_role(new_message)
+            caller_role = identified_role
+            print(f"[System]: Identified role as '{caller_role}'")
+        
+        print(f"🎯 Role={caller_role} | Intent={detect_user_intent(new_message)} | Stage: {stage} -> ", end="")
+        
+        # Handle conversation logic based on role
         if caller_role == "delivery": 
             response_text, new_stage, updated_info, action = conversation_handler.handle_delivery_logic(
-                new_message, stage, collected_info
+                new_message, stage, collected_info, caller_id
             )
         else: 
-            caller_id = data.get("caller_id")
             response_text, new_stage, updated_info, action = conversation_handler.handle_unknown_logic(
                 new_message, stage, collected_info, caller_id
             )
+        
+        print(new_stage)
         
         intent = detect_user_intent(new_message)
         
@@ -90,6 +100,7 @@ def generate():
             "updated_history": updated_history, 
             "intent": intent, 
             "stage": new_stage, 
+            "caller_role": caller_role,  # Include the identified/provided role
             "collected_info": updated_info, 
             "action": action 
         }

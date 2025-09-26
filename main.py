@@ -10,6 +10,7 @@ import os
 from app.config.config import Config
 from app.routes.conversation import conversation_bp
 from app.routes.test import test_bp
+from app.routes.role_test import role_test_bp
 
 def create_app():
     """Create and configure Flask application"""
@@ -25,6 +26,7 @@ def create_app():
     # Register blueprints
     app.register_blueprint(conversation_bp)
     app.register_blueprint(test_bp)
+    app.register_blueprint(role_test_bp)
     
     # Health check route (matches original.py /health)
     @app.route('/health', methods=['GET'])
@@ -52,6 +54,14 @@ def create_app():
                 "/list-orders",
                 "/api/test/all",
                 "/api/test/examples",
+                "/api/test/role-identification",
+                "/api/test/unknown-caller-complete", 
+                "/api/test/urgent-caller",
+                "/api/test/name-extraction",
+                "/api/test/enhanced-unknown-caller",
+                "/api/test/followup-triggers",
+                "/api/test/ai-followup-questions",
+                "/api/test/phone-extraction",
                 "/api/status"
             ]
         })
@@ -85,6 +95,14 @@ def create_app():
                     '/list-orders',
                     '/api/test/all',
                     '/api/test/examples',
+                    '/api/test/role-identification',
+                    '/api/test/unknown-caller-complete',
+                    '/api/test/urgent-caller', 
+                    '/api/test/name-extraction',
+                    '/api/test/enhanced-unknown-caller',
+                    '/api/test/followup-triggers',
+                    '/api/test/ai-followup-questions',
+                    '/api/test/phone-extraction',
                     '/api/status'
                 ],
                 'timestamp': datetime.now().isoformat()
