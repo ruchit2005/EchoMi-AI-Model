@@ -1,0 +1,23 @@
+# EchoMi AI Model - Hackathon Requirements
+# Install these packages incrementally as needed
+
+# Core Flask dependencies
+flask==3.0.0
+flask-cors==4.0.0
+
+# Data validation and serialization  
+pydantic==2.5.3
+
+# Future dependencies (install when implementing real services)
+# openai==1.3.0
+# requests==2.31.0
+# redis==5.0.1
+# geopy==2.4.0
+
+# LangGraph (for conversation management - install when needed)
+# langgraph==0.0.62
+# langchain-core==0.1.0
+
+# Development and testing
+pytest==7.4.0
+python-dotenv==1.0.0
