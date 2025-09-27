@@ -3,6 +3,7 @@
 import uuid
 from typing import Dict, Any, Tuple, Optional
 from ..utils.text_processing import detect_user_intent, format_otp_for_speech, format_number_for_speech
+from ..utils.language_utils import get_response_templates, get_language_config, format_mixed_text
 from .service_factory import ServiceFactory
 
 class ConversationHandler:
@@ -39,7 +40,7 @@ class ConversationHandler:
         # Otherwise, treat as unknown caller
         return 'unknown'
     
-    def handle_delivery_logic(self, message: str, stage: str, collected_info: Dict[str, Any], caller_id=None) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
+    def handle_delivery_logic(self, message: str, stage: str, collected_info: Dict[str, Any], caller_id=None, response_language: str = "en") -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
         """
         Enhanced delivery logic with proper conversational flow matching original.py:
         1. "How may I assist?" 
@@ -50,19 +51,29 @@ class ConversationHandler:
         """
         intent = detect_user_intent(message)
         action = {}
+        templates = get_response_templates(response_language)
         
         print(f"\n--- [DELIVERY LOGIC] START ---")
-        print(f"--- [DELIVERY LOGIC] Stage: {stage}, Intent: {intent} ---")
+        print(f"--- [DELIVERY LOGIC] Stage: {stage}, Intent: {intent}, Language: {response_language} ---")
         print(f"--- [DELIVERY LOGIC] Message: '{message}' ---")
         print(f"--- [DELIVERY LOGIC] Current collected_info: {collected_info} ---")
         
+        # Store language in collected_info for consistency
+        collected_info["language"] = response_language
+        
+        # Enhanced OTP request detection - check for Hindi patterns too
+        message_lower = message.lower().strip()
+        is_otp_request = (intent == "requesting_otp" or 
+                         any(phrase in message_lower for phrase in ["otp चाहिए", "ओटीपी चाहिए", "code चाहिए", "चाहिए otp"]))
+        
         # Handle OTP requests at any stage
-        if intent == "requesting_otp":
-            return self.handle_otp_request_logic(message, stage, collected_info)
+        if is_otp_request:
+            print("--- [DELIVERY LOGIC] OTP request detected, redirecting ---")
+            return self.handle_direct_otp_request(message, stage, collected_info, response_language)
         
         # Check if we're in an OTP-specific flow
         if stage in ["asking_otp_company", "asking_order_id", "providing_otp", "otp_provided"]:
-            return self.handle_otp_request_logic(message, stage, collected_info)
+            return self.handle_direct_otp_request(message, stage, collected_info, response_language)
         
         # Stage 1: Initial greeting - "How may I assist?"
         if stage == "start":
@@ -78,13 +89,41 @@ class ConversationHandler:
                 if company:
                     # Move to asking if they need directions
                     print(f"--- [DELIVERY LOGIC] Company '{company}' identified, asking for location help ---")
-                    return f"Hi! I see you have a delivery from {company}. Do you need help getting here, or are you already here?", "asking_location_help", collected_info, action
+                    response = templates['delivery_help'].replace("{company}", company) if response_language == 'hi' else f"Hi! I see you have a delivery from {company}. Do you need help getting here, or are you already here?"
+                    return response, "asking_location_help", collected_info, action
                 else:
                     # Ask for company first
-                    return "Hi! I can help with your delivery. Which company is this delivery from?", "asking_company_first", collected_info, action
+                    response = "धन्यवाद! आपकी डिलीवरी के लिए मैं आपकी मदद कर सकता हूँ। यह किस कंपनी से है?" if response_language == 'hi' else "Hi! I can help with your delivery. Which company is this delivery from?"
+                    return response, "asking_company_first", collected_info, action
+            elif any(greeting in message.lower() for greeting in ["hello", "hi", "hey", "namaste", "नमस्ते"]):
+                # Handle greetings - wait for more context instead of going to unknown
+                response = "नमस्ते! मैं आपकी कैसे मदद कर सकता हूँ?" if response_language == 'hi' else "Hello! How can I help you today?"
+                return response, "waiting_for_context", collected_info, action
             else:
                 # Generic greeting
-                return "Hi! How may I assist you today?", "initial_greeting", collected_info, action
+                return templates['greeting'], "initial_greeting", collected_info, action
+        
+        # Stage 1.5: Waiting for context after greeting
+        if stage == "waiting_for_context":
+            # Check if this is a delivery message
+            if intent == "initial_delivery" or any(k in message.lower() for k in ["delivery", "parcel", "package"]):
+                # Extract company information
+                extracted_info = self.extract_information_with_ai(message, collected_info)
+                collected_info.update(extracted_info)
+                company = collected_info.get("company")
+                
+                if company:
+                    # Move directly to asking if they need directions
+                    print(f"--- [DELIVERY LOGIC] Company '{company}' identified, asking for location help ---")
+                    response = templates['delivery_help'].replace("{company}", company) if response_language == 'hi' else f"I see you have a delivery from {company}. Do you need help getting here, or are you already here?"
+                    return response, "asking_location_help", collected_info, action
+                else:
+                    # Ask for company first
+                    response = "मैं आपकी डिलीवरी में मदद कर सकता हूँ। यह किस कंपनी से है?" if response_language == 'hi' else "I can help with your delivery. Which company is this from?"
+                    return response, "asking_company_first", collected_info, action
+            else:
+                # Still not clear what they need, handle as unknown caller
+                return self.handle_unknown_logic(message, "start", collected_info, caller_id, response_language)
         
         # Stage 2: After initial greeting, waiting for delivery mention
         if stage == "initial_greeting":
@@ -94,12 +133,14 @@ class ConversationHandler:
                 company = collected_info.get("company")
                 
                 if company:
-                    return f"I see you have a delivery from {company}. Do you need help getting here, or are you already here?", "asking_location_help", collected_info, action
+                    response = templates['delivery_help'].replace("{company}", company) if response_language == 'hi' else f"I see you have a delivery from {company}. Do you need help getting here, or are you already here?"
+                    return response, "asking_location_help", collected_info, action
                 else:
-                    return "I can help with your delivery. Which company is this from?", "asking_company_first", collected_info, action
+                    response = "मैं आपकी डिलीवरी में मदद कर सकता हूँ। यह किस कंपनी से है?" if response_language == 'hi' else "I can help with your delivery. Which company is this from?"
+                    return response, "asking_company_first", collected_info, action
             else:
                 # Not a delivery call, handle as unknown caller
-                return self.handle_unknown_logic(message, "start", collected_info, caller_id)
+                return self.handle_unknown_logic(message, "start", collected_info, caller_id, response_language)
         
         # Stage 3: Asked for company name first
         if stage == "asking_company_first":
@@ -107,7 +148,8 @@ class ConversationHandler:
             company = extracted_info.get("company") or message.strip().title()
             collected_info["company"] = company
             
-            return f"Thank you! So you have a delivery from {company}. Do you need help getting here, or are you already here?", "asking_location_help", collected_info, action
+            response = f"धन्यवाद! तो आपके पास {company} से डिलीवरी है। क्या आपको यहाँ आने में मदद चाहिए या आप पहले से यहाँ हैं?" if response_language == 'hi' else f"Thank you! So you have a delivery from {company}. Do you need help getting here, or are you already here?"
+            return response, "asking_location_help", collected_info, action
         
         # Stage 4: Asking if they need location help
         if stage == "asking_location_help":
@@ -117,17 +159,19 @@ class ConversationHandler:
             message_lower = message.lower().strip()
             
             # They need help with directions
-            if any(phrase in message_lower for phrase in ["need help", "help", "directions", "how to get", "where is", "guide me", "lost"]):
-                return "I'd be happy to help guide you here. What's your current location or a nearby landmark?", "getting_current_location", collected_info, action
+            if any(phrase in message_lower for phrase in ["need help", "help", "directions", "how to get", "where is", "guide me", "lost", "मदद", "रास्ता", "कहाँ", "कैसे"]):
+                response = "मैं आपकी यहाँ पहुँचने में मदद करूंगा। आपकी वर्तमान स्थिति या कोई पास का लैंडमार्क बताएं?" if response_language == 'hi' else "I'd be happy to help guide you here. What's your current location or a nearby landmark?"
+                return response, "getting_current_location", collected_info, action
             
             # They're already here / at location
-            elif any(phrase in message_lower for phrase in ["here", "arrived", "at the location", "reached", "outside", "at your place", "at the door"]):
+            elif any(phrase in message_lower for phrase in ["here", "arrived", "at the location", "reached", "outside", "at your place", "at the door", "यहाँ", "पहुँच", "आ गया", "आ चुका", "हूं", "हूँ"]):
                 print("--- [DELIVERY LOGIC] Caller says they're here, checking for OTP need ---")
-                return self.handle_arrival_and_otp_check(collected_info)
+                return self.handle_arrival_and_otp_check(collected_info, response_language)
             
             # Ambiguous response, clarify
             else:
-                return "Are you asking for directions to get here, or have you already arrived at the location?", "asking_location_help", collected_info, action
+                response = "क्या आप यहाँ आने के लिए दिशा-निर्देश चाहते हैं या आप पहले से ही यहाँ पहुँच गए हैं?" if response_language == 'hi' else "Are you asking for directions to get here, or have you already arrived at the location?"
+                return response, "asking_location_help", collected_info, action
         
         # Stage 5: Getting their current location for directions
         if stage == "getting_current_location":
@@ -184,39 +228,32 @@ class ConversationHandler:
         # Handle the rest of the existing delivery logic for OTP verification
         return self.handle_existing_delivery_logic(message, stage, collected_info, intent, action)
     
-    def handle_arrival_and_otp_check(self, collected_info: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
+    def handle_arrival_and_otp_check(self, collected_info: Dict[str, Any], response_language: str = "en") -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
         """Handle when delivery person arrives and check if they need OTP"""
         print("--- [DELIVERY LOGIC] Handling arrival and OTP check ---")
+        templates = get_response_templates(response_language)
         
         company = collected_info.get("company")
         if not company:
-            return "Great! You're here. Which company is this delivery from?", "asking_company_for_otp", {}, {}
+            response = "बहुत अच्छा! आप यहाँ हैं। यह किस कंपनी की डिलीवरी है?" if response_language == 'hi' else "Great! You're here. Which company is this delivery from?"
+            return response, "asking_company_for_otp", collected_info, {}
         
-        # Check if we have a pending order for this company
-        pending_order = None
-        order_id = None
-        
-        for oid, order_data in self.order_wallet.items():
-            if (order_data.get("company", "").lower() == company.lower() and 
-                order_data.get("status") == "pending"):
-                pending_order = order_data
-                order_id = oid
-                break
-        
-        if not pending_order:
-            # Create a mock order for testing
-            order_id = str(uuid.uuid4())
-            self.order_wallet[order_id] = {
-                "company": company,
-                "status": "approved",  # Auto-approve for demo
-                "otp": "123456"  # Mock OTP
-            }
-        
-        # Store order ID
+        # Create mock order for demo
+        order_id = str(uuid.uuid4())
+        self.order_wallet[order_id] = {
+            "company": company,
+            "status": "approved",  # Auto-approve for demo
+            "otp": "123456"  # Mock OTP
+        }
         collected_info['order_id'] = order_id
         
-        # Ask if they need OTP
-        return f"Excellent! You've reached the location with your {company} delivery. Do you need the OTP?", "asking_if_otp_needed", collected_info, {}
+        # Directly ask if they need OTP rather than generic greeting
+        if response_language == 'hi':
+            response = f"बहुत अच्छा! आप {company} डिलीवरी के साथ यहाँ पहुँच गए हैं। क्या आपको OTP चाहिए?"
+        else:
+            response = f"Perfect! You've arrived with the {company} delivery. Do you need the OTP?"
+        
+        return response, "asking_if_otp_needed", collected_info, {}
     
     def handle_existing_delivery_logic(self, message: str, stage: str, collected_info: Dict[str, Any], intent: str, action: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
         """Handle the existing delivery logic for OTP verification (matches original.py)"""
@@ -225,35 +262,21 @@ class ConversationHandler:
         if stage == "asking_if_otp_needed":
             message_lower = message.lower().strip()
             
-            if any(phrase in message_lower for phrase in ["yes", "yeah", "yep", "need", "otp", "code"]):
-                # They need OTP, proceed with verification
-                company = collected_info.get("company")
-                order_id = collected_info.get("order_id")
-                order = self.order_wallet.get(order_id) if order_id else None
+            # Enhanced detection for yes/affirmative responses including Hindi
+            if any(phrase in message_lower for phrase in ["yes", "yeah", "yep", "need", "otp", "code", "चाहिए", "हाँ", "हां", "जी", "दे"]):
+                # They need OTP - use SMS integration instead of mock OTP
+                company = collected_info.get("company") or "delivery"
                 
-                if order and order.get("tracking_id"):
-                    return f"I have the order ready. Do you have the tracking ID for the {company} delivery?", "checking_tracking_availability", collected_info, action
-                else:
-                    # For demo, directly provide OTP
-                    firebase_uid = collected_info.get('firebaseUid', 'demo-user')
-                    otp_result = self.otp_service.fetch_otp(firebase_uid, company, order_id)
-                    
-                    if otp_result["success"]:
-                        formatted_otp = format_otp_for_speech(otp_result["otp"])
-                        response_text = f"Here's your OTP for {company}: {formatted_otp}"
-                        
-                        # Mark order as completed
-                        if order_id in self.order_wallet:
-                            self.order_wallet[order_id]["status"] = "completed"
-                        
-                        return response_text, "end_of_call", collected_info, action
-                    else:
-                        return f"Sorry, I couldn't retrieve the OTP. {otp_result.get('error', 'Please try again.')}", "otp_error", collected_info, action
+                # Return SMS integration format instead of direct OTP
+                return "", "requesting_sms_otp", collected_info, {"type": "REQUEST_SMS_OTP", "company": company}
             
-            elif any(phrase in message_lower for phrase in ["no", "nope", "don't need", "not needed"]):
-                return "Alright! Have a great day and safe delivery!", "end_of_call", collected_info, action
+            elif any(phrase in message_lower for phrase in ["no", "nope", "don't need", "not needed", "नहीं", "ना"]):
+                goodbye_msg = "ठीक है! आपका दिन शुभ हो और सुरक्षित डिलीवरी करें!" if collected_info.get("language") == "hi" else "Alright! Have a great day and safe delivery!"
+                return goodbye_msg, "end_of_call", collected_info, action
             else:
-                return "Do you need me to provide the OTP for this delivery? Please say yes or no.", "asking_if_otp_needed", collected_info, action
+                # Unclear response, ask again
+                clarify_msg = "क्या आपको इस डिलीवरी के लिए OTP चाहिए? कृपया हाँ या ना कहें।" if collected_info.get("language") == "hi" else "Do you need me to provide the OTP for this delivery? Please say yes or no."
+                return clarify_msg, "asking_if_otp_needed", collected_info, action
         
         # Stage: Asked for company name for OTP
         if stage == "asking_company_for_otp":
@@ -263,6 +286,15 @@ class ConversationHandler:
             
             return self.handle_arrival_and_otp_check(collected_info)
         
+        # Handle asking OTP company stage
+        if stage == "asking_otp_company":
+            extracted_info = self.extract_information_with_ai(message, collected_info)
+            company = extracted_info.get("company") or message.strip().title()
+            collected_info["company"] = company
+            
+            # Move directly to providing OTP
+            return self.handle_direct_otp_request(message, "providing_otp", collected_info, collected_info.get("language", "en"))
+        
         # Handle conversation ending
         if intent == "ending_conversation":
             return "You're welcome! Have a safe delivery!", "end_of_call", collected_info, action
@@ -270,48 +302,292 @@ class ConversationHandler:
         # Fallback
         return "I'm here to help with your delivery. What can I assist you with?", stage, collected_info, action
     
-    def handle_otp_request_logic(self, message: str, stage: str, collected_info: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
-        """Handle OTP requests integrated with existing delivery logic (matches original.py)"""
-        intent = detect_user_intent(message)
+    def handle_direct_otp_request(self, message: str, stage: str, collected_info: Dict[str, Any], response_language: str = "en") -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
+        """Handle OTP requests directly without SMS integration - matches original.py flow"""
+        templates = get_response_templates(response_language)
         action = {}
+        
+        print(f"🔐 [DIRECT OTP] Stage: {stage}, Message: '{message}'")
+        
+        # If no company specified yet, ask for it
+        company = collected_info.get("company")
+        if not company:
+            # Try to extract company from current message
+            extracted_info = self.extract_information_with_ai(message, collected_info)
+            company = extracted_info.get("company")
+            
+            if company:
+                collected_info.update(extracted_info)
+                print(f"🔐 [DIRECT OTP] Company extracted: {company}")
+            else:
+                # Ask for company
+                response_text = "आपको किस कंपनी का OTP चाहिए?" if response_language == 'hi' else "Which company is this OTP request for?"
+                return response_text, "asking_otp_company", collected_info, action
+        
+        # We have company, provide OTP directly (mock for now)
+        print(f"🔐 [DIRECT OTP] Providing OTP for company: {company}")
+        
+        # Create mock order if not exists
+        order_id = collected_info.get("order_id")
+        if not order_id:
+            order_id = str(uuid.uuid4())
+            self.order_wallet[order_id] = {
+                "company": company,
+                "status": "approved",
+                "otp": "123456"  # Mock OTP
+            }
+            collected_info["order_id"] = order_id
+        
+        # Get OTP from service
+        firebase_uid = collected_info.get('firebaseUid', 'demo-user')
+        otp_result = self.otp_service.fetch_otp(firebase_uid, company, order_id)
+        
+        if otp_result["success"]:
+            formatted_otp = format_otp_for_speech(otp_result["otp"])
+            if response_language == 'hi':
+                response_text = f"यहाँ आपका {company} का OTP है: {formatted_otp}"
+            else:
+                response_text = f"Here's your {company} OTP: {formatted_otp}"
+            
+            # Mark order as completed
+            if order_id in self.order_wallet:
+                self.order_wallet[order_id]["status"] = "completed"
+            
+            return response_text, "otp_provided", collected_info, action
+        else:
+            error_msg = "मुझे आपका OTP लाने में समस्या हो रही है। कृपया फिर से कोशिश करें।" if response_language == 'hi' else "I'm having trouble getting your OTP. Please try again."
+            return error_msg, "otp_error", collected_info, action
+    
+    def handle_otp_request_logic(self, message: str, stage: str, collected_info: Dict[str, Any], response_language: str = "en", call_sid: str = None, conversation_history: list = None) -> Dict[str, Any]:
+        """Handle OTP requests using the new requires_sms format"""
+        intent = detect_user_intent(message)
+        templates = get_response_templates(response_language)
         
         print(f"🔐 [OTP LOGIC] Stage: {stage}, Intent: {intent}")
         print(f"🔐 [OTP LOGIC] Collected info: {collected_info}")
         
-        # If user is asking for OTP
+        # Initialize conversation history if not provided
+        if conversation_history is None:
+            conversation_history = []
+        
+        # If user is asking for OTP, request SMS data from backend
         if intent == "requesting_otp" or stage == "providing_otp":
-            firebase_uid = collected_info.get('firebaseUid', 'demo-user')
             company = collected_info.get('company')
-            order_id = collected_info.get('order_id')
             
             if not company:
-                return "Which company is this OTP request for?", "asking_otp_company", collected_info, action
+                # Ask for company first
+                response_text = "आपको किस कंपनी का OTP चाहिए?" if response_language == 'hi' else "Which company is this OTP request for?"
                 
-            if not order_id:
-                # Create a demo order
-                order_id = str(uuid.uuid4())
-                self.order_wallet[order_id] = {
-                    "company": company,
-                    "status": "approved",
-                    "otp": "123456"
+                return {
+                    "response_text": response_text,
+                    "requires_sms": False,
+                    "call_sid": call_sid,
+                    "conversation_stage": "asking_otp_company",
+                    "intent": "clarify_company",
+                    "updated_history": conversation_history + [
+                        {"role": "user", "content": message},
+                        {"role": "assistant", "content": response_text}
+                    ],
+                    "collected_info": collected_info
                 }
-                collected_info['order_id'] = order_id
             
-            # Fetch OTP
-            otp_result = self.otp_service.fetch_otp(firebase_uid, company, order_id)
+            # We have company, request SMS data to find OTP
+            if response_language == 'hi':
+                waiting_message = f"मैं आपके हाल के संदेशों में {company} का OTP खोज रहा हूँ। कृपया एक क्षण प्रतीक्षा करें।"
+            else:
+                waiting_message = f"I'll check your recent messages for the {company} OTP. Please give me a moment."
+            
+            return {
+                "response_text": waiting_message,
+                "requires_sms": True,
+                "call_sid": call_sid,
+                "conversation_stage": "checking_sms", 
+                "intent": "fetch_otp",
+                "company_requested": company,
+                "updated_history": conversation_history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": waiting_message}
+                ],
+                "collected_info": collected_info
+            }
+        
+        # Handle other stages without SMS requirement
+        return self._handle_non_sms_otp_logic(message, stage, collected_info, response_language, call_sid, conversation_history)
+    
+    def handle_sms_reprocessing(self, original_request: Dict[str, Any], sms_data: list, call_sid: str) -> Dict[str, Any]:
+        """Process SMS data and provide final OTP response"""
+        
+        original_ai_response = original_request.get("original_ai_response", {})
+        company = original_ai_response.get("company_requested", "delivery")
+        conversation_history = original_request.get("original_ai_response", {}).get("updated_history", [])
+        collected_info = original_request.get("collected_info", {})
+        response_language = collected_info.get("language", "en")
+        
+        print(f"🔄 [SMS REPROCESS] Processing {len(sms_data)} SMS messages for {company}")
+        
+        # Parse SMS messages to find OTP
+        from ..utils.sms_parser import SMSParser
+        parser = SMSParser()
+        
+        # Convert SMS data to our format and parse
+        processed_otps = []
+        for sms in sms_data:
+            message_text = sms.get("message", "")
+            sender = sms.get("sender", "")
+            
+            # Parse the SMS content
+            parsed_sms = parser.parse_sms(message_text, company)
+            
+            processed_otps.append({
+                "otp": parsed_sms.otp,
+                "sender": sender,
+                "message": message_text,
+                "company": parsed_sms.company or self._detect_company_from_sender(sender),
+                "tracking_id": parsed_sms.tracking_id,
+                "confidence": parsed_sms.confidence_score,
+                "timestamp": sms.get("timestamp")
+            })
+        
+        # Find best match for the requested company
+        best_match = self._find_best_otp_match(processed_otps, company)
+        
+        if best_match and best_match.get("otp"):
+            # Success - found OTP
+            otp = best_match["otp"]
+            formatted_otp = format_otp_for_speech(otp)
+            sender = best_match.get("sender", "SMS")
+            tracking_id = best_match.get("tracking_id")
+            confidence = best_match.get("confidence", 0)
+            
+            # Build success response and end call
+            if response_language == 'hi':
+                if confidence >= 0.8:
+                    response_text = f"मुझे आपका {company} OTP मिल गया! यह {formatted_otp} है। धन्यवाद और सुरक्षित डिलीवरी करें!"
+                else:
+                    response_text = f"मुझे {sender} से एक OTP मिला: {formatted_otp}। कृपया जाँच लें कि यह {company} का है। धन्यवाद!"
+                
+                if tracking_id:
+                    response_text += f" ट्रैकिंग नंबर: {tracking_id}"
+            else:
+                if confidence >= 0.8:
+                    response_text = f"I found your {company} OTP! It's {formatted_otp}. Thank you and have a safe delivery!"
+                else:
+                    response_text = f"I found an OTP from {sender}: {formatted_otp}. Please verify this is for {company}. Thank you!"
+                
+                if tracking_id:
+                    response_text += f" Tracking ID: {tracking_id}"
+            
+            return {
+                "response_text": response_text,
+                "requires_sms": False,
+                "conversation_stage": "call_ending",
+                "intent": "provide_otp",
+                "otp_found": otp,
+                "company": company,
+                "confidence": confidence,
+                "end_call": True,
+                "updated_history": conversation_history + [
+                    {"role": "assistant", "content": response_text}
+                ]
+            }
+        
+        else:
+            # No OTP found
+            if len(sms_data) == 0:
+                if response_language == 'hi':
+                    response_text = "मुझे आपके हाल के संदेशों में कोई SMS नहीं मिला।"
+                else:
+                    response_text = "I don't see any recent SMS messages."
+            else:
+                if response_language == 'hi':
+                    response_text = f"मैंने {len(sms_data)} संदेश देखे लेकिन {company} का कोई OTP नहीं मिला। क्या आप मैन्युअल रूप से OTP बता सकते हैं?"
+                else:
+                    response_text = f"I checked {len(sms_data)} messages but couldn't find a {company} OTP. Could you tell me the OTP manually?"
+            
+            return {
+                "response_text": response_text,
+                "requires_sms": False,
+                "conversation_stage": "otp_not_found",
+                "intent": "request_manual_otp",
+                "messages_checked": len(sms_data),
+                "updated_history": conversation_history + [
+                    {"role": "assistant", "content": response_text}
+                ]
+            }
             
             if otp_result["success"]:
-                formatted_otp = format_otp_for_speech(otp_result["otp"])
-                response_text = f"Here's your OTP for {company}: {formatted_otp}"
+                otp = otp_result["otp"]
+                formatted_otp = format_otp_for_speech(otp)
+                sender = otp_result.get("sender", "SMS")
+                confidence = otp_result.get("confidence", 0)
+                total_checked = otp_result.get("total_checked", 0)
+                tracking_id = otp_result.get("tracking_id")
+                
+                # Build intelligent response
+                response_parts = []
+                
+                if response_language == 'hi':
+                    if otp_result.get("fallback_used"):
+                        response_parts.append(f"मुझे {company} का सटीक मैच नहीं मिला, लेकिन {sender} का OTP मिला: {formatted_otp}")
+                    else:
+                        response_parts.append(f"आपका {company} OTP मिल गया: {formatted_otp}")
+                    
+                    if tracking_id:
+                        response_parts.append(f"ट्रैकिंग नंबर: {tracking_id}")
+                    
+                    if total_checked > 1:
+                        response_parts.append(f"मैंने {total_checked} SMS देखे हैं।")
+                        
+                else:
+                    if otp_result.get("fallback_used"):
+                        response_parts.append(f"No exact {company} match, but found OTP from {sender}: {formatted_otp}")
+                    else:
+                        response_parts.append(f"Found your {company} OTP: {formatted_otp}")
+                    
+                    if tracking_id:
+                        response_parts.append(f"Tracking: {tracking_id}")
+                    
+                    if total_checked > 1:
+                        response_parts.append(f"Checked {total_checked} recent messages.")
+                
+                # Add confidence indicator for low confidence matches
+                if confidence < 0.7:
+                    if response_language == 'hi':
+                        response_parts.append("कृपया जाँच लें कि यह सही OTP है।")
+                    else:
+                        response_parts.append("Please verify this is the correct OTP.")
+                
+                response_text = " ".join(response_parts)
                 
                 # Mark order as completed
                 if order_id in self.order_wallet:
                     self.order_wallet[order_id]["status"] = "completed"
                 
+                print(f"✅ [BULK SMS] Successfully found OTP: {otp} (confidence: {confidence:.2f})")
                 return response_text, "otp_provided", collected_info, action
+                
             else:
+                # No OTP found in bulk messages
                 error_msg = otp_result.get("error", "Unknown error")
-                return f"Sorry, I couldn't retrieve the OTP. {error_msg}", "otp_error", collected_info, action
+                total_checked = otp_result.get("total_checked", 0)
+                
+                if total_checked > 0:
+                    if response_language == 'hi':
+                        error_response = f"मैंने {total_checked} SMS देखे लेकिन {company} का OTP नहीं मिला। कृपया मैन्युअल रूप से बताएं।"
+                    else:
+                        error_response = f"I checked {total_checked} messages but couldn't find {company} OTP. Could you tell me the OTP manually?"
+                    
+                    print(f"❌ [BULK SMS] No OTP found for {company} in {total_checked} messages")
+                    return error_response, "manual_otp_entry", collected_info, action
+                else:
+                    # No messages at all
+                    if response_language == 'hi':
+                        fallback_response = f"मुझे कोई SMS नहीं मिला: {error_msg}। कृपया OTP बताएं।"
+                    else:
+                        fallback_response = f"I couldn't find any messages: {error_msg}. Could you tell me the OTP?"
+                    
+                    print(f"❌ [BULK SMS] No messages found: {error_msg}")
+                    return fallback_response, "manual_otp_entry", collected_info, action
         
         # Handle responses to our questions
         if stage == "asking_otp_company":
@@ -320,15 +596,177 @@ class ConversationHandler:
             collected_info["company"] = company
             
             # Try again with the company info
-            return self.handle_otp_request_logic("get otp", "providing_otp", collected_info)
+            return self.handle_otp_request_logic("get otp", "providing_otp", collected_info, response_language)
         
-        return "I can help you get an OTP. Which company is this for?", "asking_otp_company", collected_info, action
+        # Handle manual OTP entry when SMS parsing fails
+        if stage == "manual_otp_entry":
+            # Look for OTP pattern in user message
+            import re
+            otp_pattern = r'\b(\d{4,6})\b'
+            otp_match = re.search(otp_pattern, message)
+            
+            if otp_match:
+                otp = otp_match.group(1)
+                formatted_otp = format_otp_for_speech(otp)
+                company = collected_info.get('company', 'your order')
+                
+                if response_language == 'hi':
+                    response = f"धन्यवाद! {company} के लिए आपका OTP {formatted_otp} है। क्या यह सही है?"
+                else:
+                    response = f"Thank you! Your OTP for {company} is {formatted_otp}. Is this correct?"
+                
+                collected_info['manual_otp'] = otp
+                return response, "confirming_manual_otp", collected_info, {}
+            else:
+                if response_language == 'hi':
+                    response = "मुझे OTP नंबर समझ नहीं आया। कृपया केवल 4 या 6 अंकों का OTP बताएं।"
+                else:
+                    response = "I couldn't understand the OTP. Please tell me just the 4 or 6 digit numbers."
+                return response, "manual_otp_entry", collected_info, {}
+        
+        # Confirm manually entered OTP
+        if stage == "confirming_manual_otp":
+            if any(word in message.lower() for word in ['yes', 'correct', 'right', 'हाँ', 'सही', 'ठीक']):
+                otp = collected_info.get('manual_otp')
+                company = collected_info.get('company', 'your order')
+                
+                if response_language == 'hi':
+                    response = f"बहुत अच्छे! {company} का OTP {format_otp_for_speech(otp)} सुरक्षित है। कुछ और मदद चाहिए?"
+                else:
+                    response = f"Perfect! Your {company} OTP {format_otp_for_speech(otp)} is confirmed. Need any other help?"
+                
+                return response, "otp_provided", collected_info, {}
+            else:
+                if response_language == 'hi':
+                    response = "कोई बात नहीं। कृपया सही OTP बताएं।"
+                else:
+                    response = "No problem. Please tell me the correct OTP."
+                return response, "manual_otp_entry", collected_info, {}
+        
+        return "I can help you get an OTP. Which company is this for?", "asking_otp_company", collected_info, {}
     
-    def handle_unknown_logic(self, message: str, stage: str, collected_info: Dict[str, Any], caller_id=None) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
+    def _handle_non_sms_otp_logic(self, message: str, stage: str, collected_info: Dict[str, Any], response_language: str, call_sid: str, conversation_history: list) -> Dict[str, Any]:
+        """Handle OTP logic that doesn't require SMS data"""
+        
+        # Handle responses to our questions  
+        if stage == "asking_otp_company":
+            # Extract company from user response
+            from ..utils.text_processing import extract_company_from_text
+            company = extract_company_from_text(message) or message.strip().title()
+            collected_info["company"] = company
+            
+            # Now request SMS data with the company info
+            if response_language == 'hi':
+                waiting_message = f"धन्यवाद! अब मैं {company} का OTP खोज रहा हूँ।"
+            else:
+                waiting_message = f"Thank you! Now I'll look for the {company} OTP."
+            
+            return {
+                "response_text": waiting_message,
+                "requires_sms": True,
+                "call_sid": call_sid,
+                "conversation_stage": "checking_sms",
+                "intent": "fetch_otp",
+                "company_requested": company,
+                "updated_history": conversation_history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": waiting_message}
+                ],
+                "collected_info": collected_info
+            }
+        
+        # Default response
+        response_text = "मैं आपकी OTP खोजने में मदद कर सकता हूँ। किस कंपनी का है?" if response_language == 'hi' else "I can help you find an OTP. Which company is it for?"
+        
+        return {
+            "response_text": response_text,
+            "requires_sms": False,
+            "call_sid": call_sid,
+            "conversation_stage": "asking_otp_company",
+            "intent": "clarify_company",
+            "updated_history": conversation_history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response_text}
+            ],
+            "collected_info": collected_info
+        }
+    
+    def _find_best_otp_match(self, processed_otps: list, company: str) -> dict:
+        """Find the best matching OTP from processed SMS data"""
+        if not processed_otps:
+            return None
+        
+        company_lower = company.lower() if company else ""
+        best_match = None
+        best_score = 0
+        
+        for otp_data in processed_otps:
+            if not otp_data.get("otp"):
+                continue
+                
+            score = 0
+            
+            # Direct company match
+            detected_company = otp_data.get("company", "").lower()
+            if detected_company and company_lower in detected_company:
+                score += 50
+            elif company_lower in detected_company:
+                score += 30
+            
+            # Sender match
+            sender = otp_data.get("sender", "").lower()
+            if company_lower in sender:
+                score += 40
+            
+            # Message content match
+            message = otp_data.get("message", "").lower()
+            if company_lower in message:
+                score += 20
+            
+            # Confidence score
+            confidence = otp_data.get("confidence", 0)
+            score += confidence * 10
+            
+            # Recency bonus (assuming first in list is most recent)
+            if otp_data == processed_otps[0]:
+                score += 5
+            
+            if score > best_score:
+                best_match = otp_data
+                best_score = score
+        
+        return best_match
+    
+    def _detect_company_from_sender(self, sender: str) -> str:
+        """Detect company from SMS sender"""
+        if not sender:
+            return "unknown"
+        
+        sender_lower = sender.lower()
+        
+        # Common sender patterns
+        company_mapping = {
+            "zomato": ["zomato", "zmt", "zm-"],
+            "swiggy": ["swiggy", "swg", "sg-"],
+            "amazon": ["amazon", "amzn", "az-"],
+            "flipkart": ["flipkart", "fkrt", "fk-"],
+            "bigbasket": ["bigbasket", "bb-", "bigb"],
+            "dunzo": ["dunzo", "dz-"],
+        }
+        
+        for company, patterns in company_mapping.items():
+            if any(pattern in sender_lower for pattern in patterns):
+                return company
+        
+        return "unknown"
+    
+    def handle_unknown_logic(self, message: str, stage: str, collected_info: Dict[str, Any], caller_id=None, response_language: str = "en") -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
         """Handle conversation flow for unknown callers (matches original.py)"""
-        if any(k in message.lower() for k in ['urgent', 'asap', 'emergency']):
-            name_to_use = collected_info.get("name", "An unknown caller")
-            response_text = "Okay, I understand this is urgent. I am notifying Ruchit immediately."
+        templates = get_response_templates(response_language)
+        
+        if any(k in message.lower() for k in ['urgent', 'asap', 'emergency', 'जरूरी', 'तुरंत']):
+            name_to_use = collected_info.get("name", "एक अज्ञात कॉलर" if response_language == 'hi' else "An unknown caller")
+            response_text = templates.get('urgent_matter', "यह जरूरी लग रहा है। मैं तुरंत मालिक को सूचित करूंगा।" if response_language == 'hi' else "Okay, I understand this is urgent. I am notifying Ruchit immediately.")
             
             # Send urgent notification
             urgent_message = f"Urgent call from {name_to_use}."
@@ -341,7 +779,7 @@ class ConversationHandler:
         action = {}
 
         if stage == "start":
-            return "May I know who's calling?", "asking_name", collected_info, action
+            return templates['collect_name'], "asking_name", collected_info, action
 
         if stage == "collecting_contact" and intent == "provide_self_number":
             collected_info['phone'] = caller_id or "Caller's Number"

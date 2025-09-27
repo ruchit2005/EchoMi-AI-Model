@@ -18,7 +18,7 @@ def health_check():
         timestamp=time.time(),
         app_name=Config.APP_NAME,
         version=Config.VERSION,
-        mock_mode=Config.MOCK_MODE
+        mock_mode=False
     )
     
     return jsonify(health_data.model_dump()), 200
@@ -31,8 +31,7 @@ def status_check():
         'application': {
             'name': Config.APP_NAME,
             'version': Config.VERSION,
-            'debug': Config.DEBUG,
-            'mock_mode': Config.MOCK_MODE
+            'debug': Config.DEBUG
         },
         'system': {
             'python_version': sys.version,
@@ -40,10 +39,10 @@ def status_check():
             'cwd': os.getcwd()
         },
         'services': {
-            'openai': 'mock' if Config.MOCK_MODE else 'not_configured',
-            'maps': 'mock' if Config.MOCK_MODE else 'not_configured', 
-            'notifications': 'mock' if Config.MOCK_MODE else 'not_configured',
-            'otp': 'mock' if Config.MOCK_MODE else 'not_configured'
+            'openai': 'configured' if Config.OPENAI_API_KEY else 'not_configured',
+            'maps': 'configured' if Config.GOOGLE_MAPS_API_KEY else 'not_configured', 
+            'notifications': 'configured' if Config.INTERNAL_API_KEY else 'not_configured',
+            'otp': 'configured'
         },
         'timestamp': time.time()
     }), 200

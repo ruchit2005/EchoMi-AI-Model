@@ -12,17 +12,48 @@ conversation_bp = Blueprint('conversation', __name__)
 config = Config()
 conversation_handler = ConversationHandler(config)
 
+def handle_sms_reprocessing(data):
+    """Handle SMS reprocessing requests from backend"""
+    try:
+        call_sid = data.get("call_sid")
+        sms_data = data.get("sms_data", [])
+        
+        print(f"📨 [SMS REPROCESS] Processing {len(sms_data)} SMS messages for call {call_sid}")
+        
+        # Use conversation handler to process the SMS data
+        result = conversation_handler.handle_sms_reprocessing(data, sms_data, call_sid)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"❌ [SMS REPROCESS] Error: {str(e)}")
+        return jsonify({
+            "response_text": "I'm sorry, I had trouble processing your SMS messages. Could you try again?",
+            "requires_sms": False,
+            "conversation_stage": "error",
+            "error": str(e)
+        }), 500
+
 @conversation_bp.route('/generate', methods=['POST'])
 def generate():
     """
-    Main endpoint that handles conversation flow (matches original.py /generate)
+    Main endpoint that handles conversation flow with SMS integration
+    Supports both regular conversation and SMS reprocessing
     """
     try:
         data = request.get_json(force=True)
+        
+        # Check if this is a reprocessing request from backend
+        if data.get("requires_reprocessing"):
+            return handle_sms_reprocessing(data)
+        
+        # Regular conversation flow
         new_message = data.get("new_message", "").strip()
         caller_role = data.get("caller_role", "unknown")
         history = data.get("history", []) or []
         stage = data.get("conversation_stage", "start")
+        response_language = data.get("response_language", "en")
+        call_sid = data.get("call_sid", str(uuid.uuid4()))
         
         collected_info = data.get("collected_info", {}) or {}
         firebase_uid = data.get("firebaseUid")
@@ -34,23 +65,79 @@ def generate():
         if not new_message: 
             return jsonify({"error": "'new_message' is required"}), 400
         
-        # Auto-identify caller role if not provided or unknown (matches original.py logic)
+        # Auto-identify caller role if not provided or unknown
         if caller_role == "unknown" and stage == "start":
             identified_role = conversation_handler.identify_caller_role(new_message)
             caller_role = identified_role
             print(f"[System]: Identified role as '{caller_role}'")
         
-        print(f"🎯 Role={caller_role} | Intent={detect_user_intent(new_message)} | Stage: {stage} -> ", end="")
+        print(f"🎯 Role={caller_role} | Intent={detect_user_intent(new_message)} | Stage: {stage}")
         
         # Handle conversation logic based on role
         if caller_role == "delivery": 
-            response_text, new_stage, updated_info, action = conversation_handler.handle_delivery_logic(
-                new_message, stage, collected_info, caller_id
-            )
+            # Check if this is an OTP request that needs SMS integration
+            intent = detect_user_intent(new_message)
+            otp_stages = ["asking_otp_company", "asking_order_id", "providing_otp", "otp_provided", "requesting_sms_otp"]
+            
+            if intent == "requesting_otp" or stage in otp_stages:
+                # Use SMS integration format for OTP requests
+                response_data = conversation_handler.handle_otp_request_logic(
+                    new_message, stage, collected_info, response_language, call_sid, history
+                )
+                return jsonify(response_data)
+            else:
+                # Use legacy format for non-OTP delivery conversations
+                response_text, new_stage, updated_info, action = conversation_handler.handle_delivery_logic(
+                    new_message, stage, collected_info, caller_id, response_language
+                )
+                
+                # Check if the action requires SMS integration
+                if action.get("type") == "REQUEST_SMS_OTP":
+                    # Trigger SMS integration
+                    company = action.get("company", "delivery")
+                    waiting_message = f"I'll check your recent messages for the {company} OTP. Please give me a moment." if response_language == 'en' else f"मैं आपके हाल के संदेशों में {company} का OTP खोज रहा हूँ। कृपया एक क्षण प्रतीक्षा करें।"
+                    
+                    return jsonify({
+                        "response_text": waiting_message,
+                        "requires_sms": True,
+                        "call_sid": call_sid,
+                        "conversation_stage": "checking_sms",
+                        "intent": "fetch_otp",
+                        "company_requested": company,
+                        "updated_history": history + [
+                            {"role": "user", "content": new_message},
+                            {"role": "assistant", "content": waiting_message}
+                        ],
+                        "collected_info": updated_info
+                    })
+                
+                return jsonify({
+                    "response_text": response_text,
+                    "requires_sms": False,
+                    "conversation_stage": new_stage,
+                    "collected_info": updated_info,
+                    "action": action,
+                    "call_sid": call_sid
+                })
         else: 
+            # For unknown callers, use legacy format for now
             response_text, new_stage, updated_info, action = conversation_handler.handle_unknown_logic(
-                new_message, stage, collected_info, caller_id
+                new_message, stage, collected_info, caller_id, response_language
             )
+            
+            # Convert to new format for consistency
+            return jsonify({
+                "response_text": response_text,
+                "requires_sms": False,
+                "conversation_stage": new_stage,
+                "collected_info": updated_info,
+                "action": action,
+                "call_sid": call_sid,
+                "updated_history": history + [
+                    {"role": "user", "content": new_message},
+                    {"role": "assistant", "content": response_text}
+                ]
+            })
         
         print(new_stage)
         
@@ -97,6 +184,7 @@ def generate():
         
         response_data = {
             "response_text": response_text, 
+            "language": response_language,  # NEW: Return the language used
             "updated_history": updated_history, 
             "intent": intent, 
             "stage": new_stage, 

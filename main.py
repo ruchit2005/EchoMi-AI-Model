@@ -6,11 +6,15 @@ Modular version matching original.py flow exactly
 from flask import Flask, jsonify
 from flask_cors import CORS
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from app.config.config import Config
 from app.routes.conversation import conversation_bp
-from app.routes.test import test_bp
-from app.routes.role_test import role_test_bp
+from app.routes.admin import admin_bp
+from app.routes.health import health_bp
 
 def create_app():
     """Create and configure Flask application"""
@@ -25,19 +29,18 @@ def create_app():
     
     # Register blueprints
     app.register_blueprint(conversation_bp)
-    app.register_blueprint(test_bp)
-    app.register_blueprint(role_test_bp)
+    app.register_blueprint(admin_bp)
+    app.register_blueprint(health_bp)
     
-    # Health check route (matches original.py /health)
+    # Health check route
     @app.route('/health', methods=['GET'])
     def health():
         return jsonify({
-            "status": "healthy", 
-            "mock_mode": config.MOCK_MODE,
-            "openai_configured": bool(config.OPENAI_API_KEY) if not config.MOCK_MODE else True,
-            "google_maps_configured": bool(config.GOOGLE_MAPS_API_KEY) if not config.MOCK_MODE else True,
+            "status": "healthy",
+            "openai_configured": bool(config.OPENAI_API_KEY),
+            "google_maps_configured": bool(config.GOOGLE_MAPS_API_KEY),
             "nodejs_backend_configured": bool(config.NODEJS_BACKEND_URL),
-            "internal_api_configured": bool(config.INTERNAL_API_KEY) if not config.MOCK_MODE else True
+            "internal_api_configured": bool(config.INTERNAL_API_KEY)
         })
     
     @app.route('/', methods=['GET'])
@@ -62,6 +65,16 @@ def create_app():
                 "/api/test/followup-triggers",
                 "/api/test/ai-followup-questions",
                 "/api/test/phone-extraction",
+                "/api/test/language-detection",
+                "/api/test/hindi-delivery-flow", 
+                "/api/test/english-delivery-flow",
+                "/api/test/unknown-caller-multilingual",
+                "/api/test/generate-endpoint-test",
+                "/api/test/template-verification",
+                "/api/admin/configure-backend",
+                "/api/admin/test-backend",
+                "/api/admin/backend-status",
+                "/api/admin/update-config",
                 "/api/status"
             ]
         })
@@ -103,6 +116,16 @@ def create_app():
                     '/api/test/followup-triggers',
                     '/api/test/ai-followup-questions',
                     '/api/test/phone-extraction',
+                    '/api/test/language-detection',
+                    '/api/test/hindi-delivery-flow',
+                    '/api/test/english-delivery-flow', 
+                    '/api/test/unknown-caller-multilingual',
+                    '/api/test/generate-endpoint-test',
+                    '/api/test/template-verification',
+                    '/api/admin/configure-backend',
+                    '/api/admin/test-backend', 
+                    '/api/admin/backend-status',
+                    '/api/admin/update-config',
                     '/api/status'
                 ],
                 'timestamp': datetime.now().isoformat()
@@ -121,14 +144,14 @@ def create_app():
 if __name__ == '__main__':
     app = create_app()
     
-    # Print startup information (matches original.py)
+    # Print startup information
     config = Config()
     print("🚀 Starting EchoMi AI Model Flask API...")
-    print(f"📍 Mode: {'Mock' if config.MOCK_MODE else 'Production'}")
-    print(f"🗝️ OpenAI API: {'✅ (Mock)' if config.MOCK_MODE else ('✅' if config.OPENAI_API_KEY else '❌')}")
-    print(f"🗺️ Google Maps API: {'✅ (Mock)' if config.MOCK_MODE else ('✅' if config.GOOGLE_MAPS_API_KEY else '❌')}")
+    print(f"📍 Mode: Production")
+    print(f"🗝️ OpenAI API: {'✅' if config.OPENAI_API_KEY else '❌'}")
+    print(f"🗺️ Google Maps API: {'✅' if config.GOOGLE_MAPS_API_KEY else '❌'}")
     print(f"📱 Node.js Backend: {config.NODEJS_BACKEND_URL}")
-    print(f"🔐 Notification System: {'✅ (Mock)' if config.MOCK_MODE else ('✅' if config.INTERNAL_API_KEY and config.OWNER_PHONE_NUMBER else '❌')}")
+    print(f"🔐 Notification System: {'✅' if config.INTERNAL_API_KEY and config.OWNER_PHONE_NUMBER else '❌'}")
     
     app.run(
         host='0.0.0.0',

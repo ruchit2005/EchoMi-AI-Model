@@ -1,6 +1,7 @@
 # Core Flask dependencies
 Flask==3.0.0
 flask-cors==4.0.0
+python-dotenv==1.0.0
 
 # AI/ML dependencies  
 openai>=1.0.0
@@ -11,13 +12,6 @@ geopy>=2.4.0
 
 # Data validation and serialization  
 pydantic==2.5.3
-
-# SMS/Voice call services (optional - install based on your provider)
-# twilio>=8.0.0  # Uncomment if using Twilio for calls
-# msg91-lib>=5.0.0  # Uncomment if using MSG91 for SMS
-
-# Development and testing
-pytest==7.4.0
 python-dotenv>=1.0.0
 
 # Future LangGraph integration (install when needed)

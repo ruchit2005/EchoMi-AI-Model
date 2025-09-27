@@ -2,30 +2,24 @@
 
 from ..config.config import Config
 
-# Import mock services for testing
-from .mock_openai_service import MockOpenAIService
-from .mock_maps_service import MockMapsService
-from .mock_otp_service import MockOTPService
+# Import real services
+from .real_openai_service import RealOpenAIService
+from .real_maps_service import RealMapsService
+from .real_otp_service import RealOTPService
+from .sms_service import SMSService
+from .notification_service import NotificationService
 
-# Initialize services based on configuration
-if Config.MOCK_MODE:
-    # Use mock services for testing
-    openai_service = MockOpenAIService()
-    maps_service = MockMapsService()
-    otp_service = MockOTPService()
-else:
-    # Real services will be implemented later
-    # from .real_openai_service import RealOpenAIService
-    # from .real_maps_service import RealMapsService
-    # from .real_otp_service import RealOTPService
-    
-    # For now, fall back to mock services
-    openai_service = MockOpenAIService()
-    maps_service = MockMapsService()
-    otp_service = MockOTPService()
+# Initialize services - always use real services
+openai_service = RealOpenAIService(Config)
+maps_service = RealMapsService(Config)
+otp_service = RealOTPService(Config)
+sms_service = SMSService(Config)
+notification_service = NotificationService(Config)
 
 __all__ = [
     'openai_service',
     'maps_service', 
-    'otp_service'
+    'otp_service',
+    'sms_service',
+    'notification_service'
 ]

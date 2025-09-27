@@ -11,12 +11,9 @@ class Config:
     
     # Application settings
     APP_NAME = "EchoMi AI Model"
-    VERSION = "1.0.0-hackathon"
+    VERSION = "1.0.0"
     
-    # Mock mode for testing without external services
-    MOCK_MODE = os.getenv('MOCK_MODE', 'False').lower() == 'true'
-    
-    # API Keys (only used when MOCK_MODE=False)
+    # API Keys
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY')
     
@@ -28,13 +25,13 @@ class Config:
     TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
     TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
     
-    # Service configuration
-    ENABLE_REAL_SMS = os.getenv('ENABLE_REAL_SMS', 'False').lower() == 'true'
-    ENABLE_REAL_CALLS = os.getenv('ENABLE_REAL_CALLS', 'False').lower() == 'true'
-    
+    # Service configuration  
     # Backend Integration
     NODEJS_BACKEND_URL = os.getenv('NODEJS_BACKEND_URL', 'http://localhost:3000')
     INTERNAL_API_KEY = os.getenv('INTERNAL_API_KEY')
+    
+    # Admin Configuration
+    ADMIN_SECRET = os.getenv('ADMIN_SECRET', 'hackathon-admin-2024')
     
     # Notification Settings
     OWNER_PHONE_NUMBER = os.getenv('OWNER_PHONE_NUMBER')

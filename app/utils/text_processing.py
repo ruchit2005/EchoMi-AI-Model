@@ -87,21 +87,22 @@ def detect_user_intent(message: str) -> str:
     message_lower = message.lower().strip()
     message_cleaned = re.sub(r'[.!?]', '', message_lower)
     
-    # Enhanced OTP detection patterns (matching original)
+    # Enhanced OTP detection patterns (matching original + Hindi support)
     otp_patterns = [
         'otp', 'one time password', 'code', 'verification code', 
         'pin', 'security code', 'auth code', 'login code',
         'give me the code', 'what is the code', 'tell me the otp',
-        'need the otp', 'share the otp', 'provide otp'
+        'need the otp', 'share the otp', 'provide otp',
+        'otp चाहिए', 'ओटीपी चाहिए', 'कोड चाहिए', 'चाहिए otp'
     ]
     
     if any(pattern in message_lower for pattern in otp_patterns):
         return "requesting_otp"
     
-    # Check for company + OTP context
-    company_keywords = ['amazon', 'flipkart', 'myntra', 'zomato', 'swiggy', 'delivery','zepto','bluedart']
+    # Check for company + OTP context (enhanced with Hindi support)
+    company_keywords = ['amazon', 'flipkart', 'myntra', 'zomato', 'swiggy', 'delivery','zepto','bluedart', 'का', 'से']
     if (any(company in message_lower for company in company_keywords) and 
-        any(otp in message_lower for otp in ['code', 'otp', 'pin'])):
+        any(otp in message_lower for otp in ['code', 'otp', 'pin', 'चाहिए', 'कोड'])):
         return "requesting_otp"
     
     # Rest of existing intent detection logic (matching original exactly)
@@ -373,3 +374,41 @@ def calculate_confidence_score(text: str, intent: str, caller_type: str) -> floa
         base_confidence += 0.2
     
     return min(base_confidence, 0.95)  # Cap at 95%
+
+def extract_company_from_text(text: str) -> Optional[str]:
+    """Extract company name from user text"""
+    if not text:
+        return None
+    
+    text_lower = text.lower().strip()
+    
+    # Common delivery companies and their variations
+    company_patterns = {
+        "zomato": ["zomato", "zmt"],
+        "swiggy": ["swiggy", "swg"],
+        "amazon": ["amazon", "amzn", "amz"],
+        "flipkart": ["flipkart", "fkrt", "fk"],
+        "bigbasket": ["bigbasket", "big basket", "bb"],
+        "dunzo": ["dunzo"],
+        "myntra": ["myntra"],
+        "bluedart": ["bluedart", "blue dart"],
+        "delhivery": ["delhivery"],
+        "fedex": ["fedex"],
+        "paytm": ["paytm"],
+        "phonepe": ["phonepe", "phone pe"],
+        "gpay": ["gpay", "google pay"],
+    }
+    
+    # Look for exact matches first
+    for company, patterns in company_patterns.items():
+        for pattern in patterns:
+            if pattern in text_lower:
+                return company.title()
+    
+    # If no match found, return the text as-is (cleaned up)
+    # Remove common words
+    cleaned_text = re.sub(r'\b(from|for|of|the|a|an)\b', '', text_lower).strip()
+    if cleaned_text and len(cleaned_text) > 2:
+        return cleaned_text.title()
+    
+    return None
