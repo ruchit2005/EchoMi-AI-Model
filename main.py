@@ -15,6 +15,7 @@ from app.config.config import Config
 from app.routes.conversation import conversation_bp
 from app.routes.admin import admin_bp
 from app.routes.health import health_bp
+from app.routes.call_summary import call_summary_bp
 
 def create_app():
     """Create and configure Flask application"""
@@ -31,6 +32,7 @@ def create_app():
     app.register_blueprint(conversation_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(health_bp)
+    app.register_blueprint(call_summary_bp)
     
     # Health check route
     @app.route('/health', methods=['GET'])

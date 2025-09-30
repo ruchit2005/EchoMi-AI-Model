@@ -48,8 +48,26 @@ class OrderStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     DENIED = "denied"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
+
+# ========== CALL SUMMARY MODELS ==========
+
+class CallSummaryRequest(BaseModel):
+    """Request model for call summary generation"""
+    callSid: str = Field(..., description="Unique call identifier from Twilio")
+    callerNumber: str = Field(..., description="Phone number of the caller")
+    userName: str = Field(..., description="Name of the user associated with the call")
+    duration: int = Field(..., description="Call duration in seconds")
+    transcript: str = Field(..., description="Full conversation transcript with timestamps")
+    startTime: str = Field(..., description="Call start time in ISO 8601 format")
+    requestType: str = Field(default="call_summary", description="Type of request")
+
+class CallSummaryResponse(BaseModel):
+    """Response model for call summary"""
+    response_text: str = Field(..., description="Generated summary of the call")
+    status: str = Field(default="success", description="Status of the summary generation")
+    call_duration: Optional[str] = Field(None, description="Formatted call duration")
+    key_points: Optional[List[str]] = Field(None, description="Key points extracted from the call")
+    call_type: Optional[str] = Field(None, description="Type of call (delivery, inquiry, etc.)")
 
 # ========== REQUEST/RESPONSE MODELS ==========
 
