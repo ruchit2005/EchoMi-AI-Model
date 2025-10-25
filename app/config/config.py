@@ -27,7 +27,7 @@ class Config:
     
     # Service configuration  
     # Backend Integration
-    NODEJS_BACKEND_URL = os.getenv('NODEJS_BACKEND_URL', 'http://localhost:3000')
+    NODEJS_BACKEND_URL = os.getenv('NODEJS_BACKEND_URL', 'https://echomibackend-production.up.railway.app')
     INTERNAL_API_KEY = os.getenv('INTERNAL_API_KEY')
     
     # Admin Configuration

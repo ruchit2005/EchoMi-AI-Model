@@ -74,7 +74,7 @@ OPENAI_API_KEY=sk-proj-your-openai-api-key-here
 GOOGLE_MAPS_API_KEY=your-google-maps-api-key-here
 
 # Backend Integration
-NODEJS_BACKEND_URL=https://your-backend-url.ngrok-free.app
+NODEJS_BACKEND_URL=https://echomibackend-production.up.railway.app
 INTERNAL_API_KEY=your-secure-internal-api-key
 OWNER_PHONE_NUMBER=+1234567890
 
