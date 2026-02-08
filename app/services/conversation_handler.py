@@ -5,6 +5,7 @@ from typing import Dict, Any, Tuple, Optional
 from ..utils.text_processing import detect_user_intent, format_otp_for_speech, format_number_for_speech
 from ..utils.language_utils import get_response_templates, get_language_config, format_mixed_text
 from .service_factory import ServiceFactory
+from .delivery_guidance_service import DeliveryGuidanceService
 
 class ConversationHandler:
     """Main conversation handler that matches original.py logic"""
@@ -18,6 +19,9 @@ class ConversationHandler:
         self.maps_service = self.service_factory.maps_service
         self.otp_service = self.service_factory.otp_service
         self.notification_service = self.service_factory.notification_service
+        
+        # Initialize delivery guidance service
+        self.delivery_guide = DeliveryGuidanceService(config)
         
         # ORDER_WALLET equivalent - stores pending orders
         self.order_wallet = {}
@@ -177,36 +181,46 @@ class ConversationHandler:
         if stage == "getting_current_location":
             print("--- [DELIVERY LOGIC] Processing current location for directions ---")
             
-            # Try to geocode their location
-            geocode_results = self.maps_service.geocode_location(message)
+            # Use delivery guidance service to find them and guide them
+            guidance_result = self.delivery_guide.guide_delivery_person(
+                landmark_description=message,
+                max_radius_km=1.0  # Search within 1km of destination
+            )
             
-            if geocode_results and len(geocode_results) > 0:
-                best_result = geocode_results[0]
-                collected_info['current_location'] = best_result
+            if guidance_result['success']:
+                landmark = guidance_result['landmark']
+                route = guidance_result['route']
+                directions = guidance_result['turn_by_turn_directions']
                 
-                # Get directions and ETA
-                directions_result = self.maps_service.get_directions_to_customer(
-                    current_location=best_result,
-                    customer_address="123 Main St, Bangalore"  # Mock customer address
-                )
+                # Save their location
+                collected_info['current_location'] = {
+                    'name': landmark['name'],
+                    'address': landmark['address'],
+                    'distance_km': landmark['distance_from_destination']
+                }
                 
-                if directions_result.get("directions"):
-                    response_parts = [
-                        f"I found your location: {best_result['place_name']}.",
-                        f"Here are the directions: {directions_result['directions']}"
-                    ]
-                    
-                    if directions_result.get("eta"):
-                        response_parts.append(directions_result["eta"])
-                    
-                    response_parts.append("Let me know when you arrive!")
-                    
-                    response_text = " ".join(response_parts)
-                    return response_text, "traveling_to_location", collected_info, action
-                else:
-                    return f"I found your location: {best_result['place_name']}, but I couldn't get detailed directions. Please use your GPS to navigate to the delivery address. Let me know when you arrive!", "traveling_to_location", collected_info, action
+                # Create comprehensive response
+                response_parts = [
+                    f"Perfect! I found you near {landmark['name']}.",
+                    f"You're about {route['total_distance_km']}km away, roughly {route['estimated_time_minutes']} minutes walk.",
+                    "Here are your directions:"
+                ]
+                
+                # Add first 3 turn-by-turn directions
+                for i, step in enumerate(directions[:3], 1):
+                    response_parts.append(f"{i}. {step}")
+                
+                response_parts.append("Let me know when you arrive!")
+                
+                response_text = " ".join(response_parts)
+                return response_text, "traveling_to_location", collected_info, action
             else:
-                return "I couldn't find that location. Could you try a more specific address or nearby landmark?", "getting_current_location", collected_info, action
+                # Couldn't find the landmark
+                error_message = guidance_result.get('error', 'Unknown error')
+                suggestion = guidance_result.get('suggestion', 'Can you describe another nearby landmark?')
+                
+                response = f"I couldn't find '{message}' near the delivery address. {suggestion}"
+                return response, "getting_current_location", collected_info, action
         
         # Stage 6: They're traveling, waiting for arrival
         if stage == "traveling_to_location":
@@ -893,9 +907,13 @@ class ConversationHandler:
         return "Thank you for calling. I'll make sure Ruchit gets your message. Have a great day!", "end_of_call", collected_info, action
     
     def extract_information_with_ai(self, message: str, collected_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract information using AI (enhanced implementation to handle mixed languages)"""
-        extracted = {}
+        """Extract information using AI service"""
+        # Use the real OpenAI service's extraction method
+        if hasattr(self.openai_service, 'extract_information_with_ai'):
+            return self.openai_service.extract_information_with_ai(message, collected_info)
         
+        # Fallback to simple extraction
+        extracted = {}
         message_lower = message.lower()
         
         # Extract company names
@@ -905,56 +923,7 @@ class ConversationHandler:
                 extracted["company"] = company.title()
                 break
         
-        # Enhanced name extraction with better patterns
-        name_patterns = [
-            # Direct patterns
-            r"my name is\s+([a-zA-Z\s]+)",
-            r"i am\s+([a-zA-Z\s]+)", 
-            r"this is\s+([a-zA-Z\s]+)",
-            r"i'm\s+([a-zA-Z\s]+)",
-            # Spelled out patterns
-            r"([a-z]\s+[a-z]\s+[a-z]\s+[a-z]\s+[a-z])",  # r u d r a
-            r"([a-z]\s+[a-z]\s+[a-z]\s+[a-z])",  # r u d r  
-            r"([a-z]\s+[a-z]\s+[a-z])",  # a b c
-            # Mixed language patterns
-            r"name is\s+([^\s,]+)",  # Captures non-English names
-            r"is\s+([^\s,\.]+)",  # Generic capture after "is"
-        ]
-        
-        import re
-        for pattern in name_patterns:
-            match = re.search(pattern, message_lower)
-            if match:
-                potential_name = match.group(1).strip()
-                
-                # Clean up spelled out names (r u d r a -> rudra)
-                if ' ' in potential_name and len(potential_name.split()) > 2:
-                    # Check if it's spelled out (single letters with spaces)
-                    parts = potential_name.split()
-                    if all(len(part) == 1 and part.isalpha() for part in parts):
-                        potential_name = ''.join(parts)
-                
-                # Filter out common words and very short/long names
-                if (potential_name and 
-                    len(potential_name) > 1 and 
-                    len(potential_name) < 20 and
-                    potential_name not in ['calling', 'talking', 'speaking', 'here', 'you', 'me']):
-                    extracted["name"] = potential_name.title()
-                    break
-        
-        # If still no name found, try to extract from non-English text
-        if not extracted.get("name"):
-            # Look for patterns like "रूद्रा" or similar
-            words = message.split()
-            for word in words:
-                # Skip common English words
-                if (word not in ['my', 'name', 'is', 'this', 'i', 'am', 'the', 'a', 'an'] and
-                    len(word) > 1 and len(word) < 15):
-                    # Could be a name in another language
-                    extracted["name"] = word.strip('.,!?').title()
-                    break
-        
-        # Extract phone numbers using the improved utility function
+        # Extract phone numbers
         from ..utils.text_processing import extract_phone_number
         phone = extract_phone_number(message)
         if phone:

@@ -24,8 +24,9 @@ class ServiceFactory:
     def maps_service(self):
         """Get Maps service"""
         if self._maps_service is None:
-            from app.services.real_maps_service import RealMapsService
-            self._maps_service = RealMapsService(self.config)
+            # Use Mapbox service for production
+            from app.services.mapbox_service import MapboxService
+            self._maps_service = MapboxService(self.config)
         return self._maps_service
     
     @property

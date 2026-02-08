@@ -40,7 +40,7 @@ def status_check():
         },
         'services': {
             'openai': 'configured' if Config.OPENAI_API_KEY else 'not_configured',
-            'maps': 'configured' if Config.GOOGLE_MAPS_API_KEY else 'not_configured', 
+            'mapbox': 'configured' if Config.MAPBOX_API_KEY else 'not_configured',
             'notifications': 'configured' if Config.INTERNAL_API_KEY else 'not_configured',
             'otp': 'configured'
         },

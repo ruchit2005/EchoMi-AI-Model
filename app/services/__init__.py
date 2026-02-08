@@ -4,14 +4,14 @@ from ..config.config import Config
 
 # Import real services
 from .real_openai_service import RealOpenAIService
-from .real_maps_service import RealMapsService
+from .mapbox_service import MapboxService
 from .real_otp_service import RealOTPService
 from .sms_service import SMSService
 from .notification_service import NotificationService
 
 # Initialize services - always use real services
 openai_service = RealOpenAIService(Config)
-maps_service = RealMapsService(Config)
+maps_service = MapboxService(Config)
 otp_service = RealOTPService(Config)
 sms_service = SMSService(Config)
 notification_service = NotificationService(Config)

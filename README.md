@@ -24,7 +24,7 @@ EchoMi AI Model is a sophisticated Flask-based AI assistant designed to handle d
 - **OpenAI GPT-4o-mini**: Advanced natural language understanding
 - **Node.js Backend**: SMS message processing and storage
 - **MongoDB Integration**: Data persistence through backend API
-- **Google Maps API**: Location services (configurable)
+- **Mapbox**: Professional geocoding and routing services
 - **Notification System**: Real-time alerts for unknown callers
 
 ### 🛡️ **Security & Reliability**
@@ -38,7 +38,7 @@ EchoMi AI Model is a sophisticated Flask-based AI assistant designed to handle d
 - **Python 3.11+**
 - **Node.js Backend** (for SMS integration)
 - **OpenAI API Key**
-- **Google Maps API Key** (optional)
+- **Mapbox API Key**
 - **ngrok** (for local development with webhooks)
 
 ## 🔧 Installation
@@ -71,7 +71,7 @@ Create a `.env` file in the root directory:
 ```env
 # Required API Keys
 OPENAI_API_KEY=sk-proj-your-openai-api-key-here
-GOOGLE_MAPS_API_KEY=your-google-maps-api-key-here
+MAPBOX_API_KEY=pk.your-mapbox-access-token-here
 
 # Backend Integration
 NODEJS_BACKEND_URL=https://your-backend-url.ngrok-free.app

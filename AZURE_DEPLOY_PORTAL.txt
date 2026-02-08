@@ -1,0 +1,137 @@
+EchoMi AI Model — Deploy to Azure using the Portal (no CLI)
+
+This step-by-step guide shows how to deploy your Flask AI app to Azure using only the Azure Portal (web UI). Two recommended portal workflows are included:
+
+- Option A (recommended): App Service (Web App for Containers) using Deployment Center -> GitHub (portal orchestrates build + deploy, no CLI needed)
+- Option B: Azure Container Registry (ACR) Tasks build from GitHub + App Service container from ACR (portal-only setup using ACR Tasks)
+
+Before you begin (local repo prep - one-time):
+1. Ensure your repository contains a working Dockerfile at the repository root that starts your Flask app (or if you prefer use App Service build, ensure `requirements.txt` and `main.py` exist and app is ready to be built by Oryx). Example Dockerfile is helpful but not strictly required for App Service non-container deployment.
+2. Make sure `requirements.txt` is accurate.
+3. Commit and push your code to GitHub.
+
+--------------------------------------------------------------------------------
+OPTION A — App Service (Web App for Containers) using Deployment Center (GitHub build)
+This approach uses Azure's Deployment Center to connect to your GitHub repo and either build a Docker image (if Dockerfile in repo) or run the platform build (Oryx) and deploy. It does not require CLI.
+
+Steps:
+1. Sign in to the Azure Portal: https://portal.azure.com
+
+2. Create a Resource Group (if you don't already have one):
+   - Search "Resource groups" -> + Create -> Choose Subscription -> Enter Resource group name (e.g., echomi-rg) -> Region -> Review + Create.
+
+3. Create an App Service Plan:
+   - Search "App Service plans" -> + Create -> Choose Resource group -> Name (e.g., echomi-plan) -> Publish: "Code" or "Docker Container". For container deployments select "Docker Container". For platform build (no Dockerfile), choose "Code" with runtime "Python 3.11". Pick SKU (B1 for testing, P1v2 for production). -> Review + Create.
+
+4. Create the Web App:
+   - Search "App Services" -> + Create -> Select Resource group and the App Service plan you created -> Enter instance name (app name, must be unique) -> Publish: select "Docker Container" if you want a container app, or "Code" if you want Azure to build from source (Oryx).
+   - If you selected "Docker Container" you can leave image blank for now; Deployment Center will configure it. Finish Create.
+
+5. Configure Deployment Center (connect GitHub):
+   - Open your Web App resource in the portal -> left nav -> "Deployment Center".
+   - For Source, choose "GitHub" (authorize if required), then choose your Organization, Repository and Branch (main). Click Continue.
+   - For Build provider: choose "GitHub Actions" (recommended) or "Azure Pipelines". If your repo contains a Dockerfile and you chose Docker earlier, Deployment Center will generate a GitHub Actions workflow that builds the Docker image and pushes to the App Service container. If you chose "Code" and Python runtime, the workflow will use the Oryx build and deploy directly.
+   - Review the generated workflow summary and click Finish/Save. This will create a GitHub Actions workflow in your repository under `.github/workflows/` (Azure created it for you). The portal handles the rest—no CLI required.
+
+6. Configure Application Settings (environment variables):
+   - In your Web App -> Configuration -> Application settings -> Add new application settings for production secrets and values:
+     - OPENAI_API_KEY = <your openai key>
+     - NODEJS_BACKEND_URL = https://echomibackend-production.up.railway.app
+     - INTERNAL_API_KEY = <your internal key>
+     - OWNER_PHONE_NUMBER = +918777508827 (or your value)
+     - PORT = 8000 (if your Dockerfile or app listens on 8000) or leave default 80 for code deployments
+   - Save and allow the app to restart.
+
+7. (Optional but recommended) Use Key Vault for secrets:
+   - Create a Key Vault resource (search "Key Vaults" -> + Create) in the same resource group.
+   - Add secrets in Key Vault: e.g., OPENAI-API-KEY, INTERNAL-API-KEY.
+   - In your Web App -> Identity -> enable System assigned managed identity -> Save.
+   - In Key Vault -> Access policies or "Access control (IAM)" -> Grant your Web App identity the permission to Get (Secrets) -> Save.
+   - In the Web App -> Configuration -> set the app setting value to reference the Key Vault secret: @Microsoft.KeyVault(SecretUri=<secret full uri>)
+   - Save and restart.
+
+8. Monitor the deployment & logs:
+   - Deployment Center -> Logs will show build/deploy progress from GitHub Actions.
+   - Web App -> "Log stream" to tail logs from the running container app or web app.
+   - Check App Insights (if configured) for traces and exceptions.
+
+9. Test your endpoints:
+   - Visit https://<your-webapp-name>.azurewebsites.net/health and other endpoints (e.g., /generate) to validate.
+
+10. Troubleshooting:
+   - If build fails, open the GitHub Actions run (link provided in Deployment Center) to see logs.
+   - If container fails to start, check Web App -> Container settings and Log Stream.
+
+--------------------------------------------------------------------------------
+OPTION B — ACR Tasks (build in ACR from GitHub) + App Service pulling image from ACR (portal-only)
+This approach uses Azure Container Registry's Tasks feature to build your Docker image from your GitHub repo directly in ACR. After the image is built, the App Service pulls the image from ACR.
+
+Steps:
+1. Sign-in to Azure Portal and create Resource Group (if needed).
+
+2. Create an Azure Container Registry (ACR):
+   - Search "Container registries" -> + Create -> Choose Resource group -> Registry name -> SKU (Basic is fine for small projects) -> Review + Create.
+
+3. In the ACR resource -> "Tasks" -> + Create Task:
+   - Task name: echomi-build
+   - Source Type: GitHub (authorize) -> choose org/repo/branch -> Dockerfile path (e.g., /Dockerfile)
+   - Build details: choose image name and tag (e.g., echomi-ai:{{.Run.ID}} or :latest) and choose trigger: Manual or Continuous Integration (CI) so ACR builds on push.
+   - Save/create. ACR will run the task and build the image inside Azure (no local Docker required).
+
+4. Wait for the image build to complete. In ACR -> Repositories you will see the pushed image and tags.
+
+5. Create an App Service (Web App for Containers) or update existing Web App to use ACR image:
+   - Create App (App Service) -> Publish: Docker Container -> choose Linux plan.
+   - In the Web App -> Deployment -> Container settings -> choose "Azure Container Registry" -> select your registry and repository and the image tag you built.
+   - For authentication: you can enable the Web App managed identity and grant it AcrPull role (preferred) OR use admin username/password from ACR (less secure). Portal provides guidance to assign roles.
+
+6. Configure app settings (same as Option A) and Key Vault usage if desired.
+
+7. Start app and tail logs from Web App -> Log stream.
+
+8. Test endpoints as above.
+
+--------------------------------------------------------------------------------
+Important Portal UI locations & tips (quick map):
+- Create resources: "Resource groups" / "App Services" / "Container registries" / "Key Vaults" / "Application Insights"
+- Web App details: App Service -> Configuration -> Identity -> Deployment Center -> Log stream -> Networking -> TLS/Custom domains
+- ACR builds: Container registries -> Your ACR -> Tasks -> Runs -> Repositories
+- Key Vault: Key vault -> Secrets -> Access policies (or Access control (IAM))
+
+--------------------------------------------------------------------------------
+How to set config values your app expects (example list):
+- OPENAI_API_KEY (secret)
+- NODEJS_BACKEND_URL (https://echomibackend-production.up.railway.app)
+- INTERNAL_API_KEY (secret)
+- OWNER_PHONE_NUMBER
+- SMS provider keys (if used): SMS_API_KEY etc.
+
+Set these under your Web App -> Configuration -> Application settings (Name / Value) and Save. App will restart automatically.
+
+--------------------------------------------------------------------------------
+Testing and verification (portal-only):
+1. Once deployment finishes, open your web app URL: https://<your-webapp-name>.azurewebsites.net/health.
+2. Use Postman or curl to POST to /generate with a small JSON payload and verify responses.
+3. Use Web App -> Log stream for live logs if requests fail.
+4. Check Deployment Center -> Logs for build logs and GitHub Actions run link.
+
+--------------------------------------------------------------------------------
+Post-deploy recommendations:
+- Configure Application Insights for monitoring (create and link through Web App -> Application Insights).
+- Enable HTTPS only in Web App -> TLS/SSL settings.
+- Configure Autoscale rules under the App Service Plan if you expect variable load.
+- Protect secrets in Key Vault and use managed identity to access them.
+
+--------------------------------------------------------------------------------
+Common portal pitfalls (and how to fix them without CLI):
+- "App not starting": Check Log stream and Container Settings (image name, tag). If build used GitHub Actions, view the Actions run via Deployment Center link.
+- "401 when calling backend" from Web App to your backend: make sure INTERNAL_API_KEY and NODEJS_BACKEND_URL are set as app settings and that the Node backend allows your app origin if needed.
+- "Secrets not available via Key Vault reference": Ensure managed identity is enabled and Key Vault access policy grants Get for secrets to that identity.
+
+--------------------------------------------------------------------------------
+If you want, I can now:
+- Generate a ready-to-save `AZURE_DEPLOY_PORTAL.txt` file in your repo (this file) — already saved.
+- Create a short checklist or printable version for non-technical stakeholders.
+- Walk you through the Portal screens step-by-step while you have the portal open (I can provide the exact clicks and fields).
+
+Good luck — you can deploy from the Azure Portal without using any CLI. If you prefer, tell me which option you want to use (Option A: Deployment Center/GitHub Actions or Option B: ACR Tasks + App Service) and I will produce a compact checklist with the exact button names for each Portal screen.

@@ -40,7 +40,7 @@ def create_app():
         return jsonify({
             "status": "healthy",
             "openai_configured": bool(config.OPENAI_API_KEY),
-            "google_maps_configured": bool(config.GOOGLE_MAPS_API_KEY),
+            "mapbox_configured": bool(config.MAPBOX_API_KEY),
             "nodejs_backend_configured": bool(config.NODEJS_BACKEND_URL),
             "internal_api_configured": bool(config.INTERNAL_API_KEY)
         })
@@ -98,7 +98,7 @@ def create_app():
                 'services': handler.service_factory.get_service_status(),
                 'api_keys': {
                     'openai': bool(config.OPENAI_API_KEY),
-                    'google_maps': bool(config.GOOGLE_MAPS_API_KEY),
+                    'mapbox': bool(config.MAPBOX_API_KEY),
                     'sms': bool(getattr(config, 'SMS_API_KEY', None)),
                     'call': bool(getattr(config, 'CALL_API_KEY', None))
                 },
@@ -151,7 +151,7 @@ if __name__ == '__main__':
     print("🚀 Starting EchoMi AI Model Flask API...")
     print(f"📍 Mode: Production")
     print(f"🗝️ OpenAI API: {'✅' if config.OPENAI_API_KEY else '❌'}")
-    print(f"🗺️ Google Maps API: {'✅' if config.GOOGLE_MAPS_API_KEY else '❌'}")
+    print(f"🗺️ Mapbox API: {'✅' if config.MAPBOX_API_KEY else '❌'}")
     print(f"📱 Node.js Backend: {config.NODEJS_BACKEND_URL}")
     print(f"🔐 Notification System: {'✅' if config.INTERNAL_API_KEY and config.OWNER_PHONE_NUMBER else '❌'}")
     

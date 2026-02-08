@@ -15,7 +15,7 @@ class Config:
     
     # API Keys
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY')
+    MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY')
     
     # SMS/Call service API keys
     SMS_API_KEY = os.getenv('SMS_API_KEY')  # MSG91 or similar
@@ -36,6 +36,13 @@ class Config:
     # Notification Settings
     OWNER_PHONE_NUMBER = os.getenv('OWNER_PHONE_NUMBER')
     
+    # Mock Mode (for testing without real APIs)
+    MOCK_MODE = os.getenv('MOCK_MODE', 'False').lower() == 'true'
+    
+    # User Location Settings (VIT Vellore)
+    USER_LAT = os.getenv('USER_LAT', '12.974072987767554')
+    USER_LNG = os.getenv('USER_LNG', '79.16395954535963')
+    
     # Logging configuration
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     
@@ -51,7 +58,7 @@ class Config:
         )
         
         app.logger.info(f"🔧 {Config.APP_NAME} v{Config.VERSION} configured")
-        app.logger.info(f"🧪 Mock mode: {'ON' if Config.MOCK_MODE else 'OFF'}")
+        app.logger.info(f"🧪 Mock mode: {'ON' if getattr(Config, 'MOCK_MODE', False) else 'OFF'}")
 
 class DevelopmentConfig(Config):
     """Development configuration"""

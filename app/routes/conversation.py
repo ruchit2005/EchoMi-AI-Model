@@ -43,6 +43,56 @@ def generate():
     try:
         data = request.get_json(force=True)
         
+        # Check if this is a call summary request
+        if data.get("requestType") == "call_summary":
+            from ..services.call_summary_service import CallSummaryService
+            call_summary_service = CallSummaryService(config)
+            
+            call_sid = data.get("callSid", "unknown")
+            caller_number = data.get("callerNumber", "unknown")
+            user_name = data.get("userName", "User")
+            duration = data.get("duration", 0)
+            start_time = data.get("startTime", "")
+            
+            # Extract transcript from the message (backend puts it in new_message)
+            message = data.get("new_message", "")
+            transcript_start = message.find("TRANSCRIPT:")
+            if transcript_start > 0:
+                transcript = message[transcript_start + len("TRANSCRIPT:"):].strip()
+                # Remove the instruction part
+                if "Please respond with ONLY the summary" in transcript:
+                    transcript = transcript.split("Please respond with ONLY the summary")[0].strip()
+            else:
+                transcript = message
+            
+            print(f"📝 [SUMMARY REQUEST] Generating for call {call_sid}")
+            
+            summary_result = call_summary_service.generate_summary(
+                call_sid=call_sid,
+                caller_number=caller_number,
+                user_name=user_name,
+                duration=duration,
+                transcript=transcript,
+                start_time=start_time
+            )
+            
+            if summary_result["success"]:
+                return jsonify({
+                    "response_text": summary_result["summary"],
+                    "conversation_stage": "end_of_call",
+                    "requires_sms": False,
+                    "call_sid": call_sid,
+                    "collected_info": data.get("collected_info", {}),
+                    "updated_history": data.get("history", [])
+                })
+            else:
+                return jsonify({
+                    "response_text": f"Call completed. Summary generation failed: {summary_result.get('error')}",
+                    "conversation_stage": "end_of_call",
+                    "requires_sms": False,
+                    "call_sid": call_sid
+                })
+        
         # Check if this is a reprocessing request from backend
         if data.get("requires_reprocessing"):
             return handle_sms_reprocessing(data)
@@ -70,6 +120,16 @@ def generate():
             identified_role = conversation_handler.identify_caller_role(new_message)
             caller_role = identified_role
             print(f"[System]: Identified role as '{caller_role}'")
+        
+        # If we're in a delivery-specific stage, maintain delivery role
+        delivery_stages = [
+            "asking_company_first", "asking_location_help", "getting_current_location",
+            "providing_directions", "arrived_at_location", "asking_for_otp_need",
+            "asking_otp_company", "asking_order_id", "providing_otp", "otp_provided"
+        ]
+        if stage in delivery_stages or collected_info.get("company"):
+            caller_role = "delivery"
+            print(f"[System]: Delivery context detected (stage='{stage}', company='{collected_info.get('company')}') - maintaining delivery role")
         
         print(f"🎯 Role={caller_role} | Intent={detect_user_intent(new_message)} | Stage: {stage}")
         
