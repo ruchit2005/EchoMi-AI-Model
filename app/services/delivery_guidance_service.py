@@ -46,16 +46,31 @@ class DeliveryGuidanceService:
             "pizza": [("amenity", "fast_food"), ("amenity", "restaurant")],
         }
     
-    def guide_delivery_person(self, landmark_description: str, max_radius_km: float = 2.0) -> Dict[str, Any]:
-        """Guide delivery person from nearby landmark to destination"""
+    def guide_delivery_person(self, landmark_description: str, max_radius_km: float = 2.0, destination_coords: tuple = None) -> Dict[str, Any]:
+        """Guide delivery person from nearby landmark to destination
+        
+        Args:
+            landmark_description: Description of landmark near delivery person
+            max_radius_km: Search radius in kilometers
+            destination_coords: Optional tuple of (latitude, longitude) - uses live location if provided,
+                                otherwise falls back to config values
+        """
+        # Use provided coordinates or fall back to config
+        if destination_coords:
+            dest_lat, dest_lng = destination_coords
+            print(f"[DELIVERY GUIDE] Using LIVE destination: {dest_lat}, {dest_lng}")
+        else:
+            dest_lat, dest_lng = self.destination_lat, self.destination_lng
+            print(f"[DELIVERY GUIDE] Using CONFIG destination: {dest_lat}, {dest_lng}")
+        
         print(f"[DELIVERY GUIDE] Searching for '{landmark_description}' near destination...")
         
         # Try Overpass API first for category searches (pharmacy, hospital, etc.)
-        landmarks = self._search_overpass(landmark_description, max_radius_km)
+        landmarks = self._search_overpass(landmark_description, max_radius_km, dest_lat, dest_lng)
         
         # Fallback to Nominatim for specific place names
         if not landmarks:
-            landmarks = self._search_osm(landmark_description, max_radius_km)
+            landmarks = self._search_osm(landmark_description, max_radius_km, dest_lat, dest_lng)
         
         if not landmarks:
             return {
@@ -67,8 +82,8 @@ class DeliveryGuidanceService:
         closest = landmarks[0]
         print(f"[DELIVERY GUIDE] Found: {closest['name']} ({closest['distance_km']}km away)")
         
-        # Get directions
-        directions = self._get_directions(closest['lat'], closest['lng'])
+        # Get directions from landmark to destination
+        directions = self._get_directions(closest['lat'], closest['lng'], dest_lat, dest_lng)
         
         return {
             "success": True,
@@ -85,8 +100,14 @@ class DeliveryGuidanceService:
             "turn_by_turn_directions": directions['steps']
         }
     
-    def _search_overpass(self, query: str, radius_km: float) -> List[Dict[str, Any]]:
+    def _search_overpass(self, query: str, radius_km: float, dest_lat: float = None, dest_lng: float = None) -> List[Dict[str, Any]]:
         """Search OpenStreetMap using Overpass API for category-based POI searches"""
+        # Use provided coordinates or fall back to instance defaults
+        if dest_lat is None:
+            dest_lat = self.destination_lat
+        if dest_lng is None:
+            dest_lng = self.destination_lng
+            
         try:
             cleaned = self._clean_query(query).lower()
             
@@ -108,11 +129,11 @@ class DeliveryGuidanceService:
             queries = []
             for key, value in osm_tags:
                 if value == "*":
-                    queries.append(f'node["{key}"](around:{radius_meters},{self.destination_lat},{self.destination_lng});')
-                    queries.append(f'way["{key}"](around:{radius_meters},{self.destination_lat},{self.destination_lng});')
+                    queries.append(f'node["{key}"](around:{radius_meters},{dest_lat},{dest_lng});')
+                    queries.append(f'way["{key}"](around:{radius_meters},{dest_lat},{dest_lng});')
                 else:
-                    queries.append(f'node["{key}"="{value}"](around:{radius_meters},{self.destination_lat},{self.destination_lng});')
-                    queries.append(f'way["{key}"="{value}"](around:{radius_meters},{self.destination_lat},{self.destination_lng});')
+                    queries.append(f'node["{key}"="{value}"](around:{radius_meters},{dest_lat},{dest_lng});')
+                    queries.append(f'way["{key}"="{value}"](around:{radius_meters},{dest_lat},{dest_lng});')
             
             overpass_query = f"[out:json];({' '.join(queries)});out center;"
             
@@ -137,7 +158,7 @@ class DeliveryGuidanceService:
                 if not lat or not lng:
                     continue
                 
-                distance = self._calc_distance(lat, lng)
+                distance = self._calc_distance(lat, lng, dest_lat, dest_lng)
                 if distance <= radius_km:
                     tags = element.get("tags", {})
                     name = tags.get("name", tags.get("brand", "Unnamed"))
@@ -165,8 +186,14 @@ class DeliveryGuidanceService:
             print(f"[OVERPASS] Error: {e}")
             return []
     
-    def _search_osm(self, query: str, radius_km: float) -> List[Dict[str, Any]]:
+    def _search_osm(self, query: str, radius_km: float, dest_lat: float = None, dest_lng: float = None) -> List[Dict[str, Any]]:
         """Search OpenStreetMap Nominatim"""
+        # Use provided coordinates or fall back to instance defaults
+        if dest_lat is None:
+            dest_lat = self.destination_lat
+        if dest_lng is None:
+            dest_lng = self.destination_lng
+            
         try:
             cleaned = self._clean_query(query)
             print(f"[OSM] Searching: '{cleaned}'")
@@ -189,7 +216,7 @@ class DeliveryGuidanceService:
             for place in results:
                 lat = float(place.get("lat", 0))
                 lng = float(place.get("lon", 0))
-                distance = self._calc_distance(lat, lng)
+                distance = self._calc_distance(lat, lng, dest_lat, dest_lng)
                 
                 if distance <= radius_km:
                     name = place.get("display_name", "").split(",")[0]
@@ -209,10 +236,16 @@ class DeliveryGuidanceService:
             print(f"[OSM] Error: {e}")
             return []
     
-    def _get_directions(self, origin_lat: float, origin_lng: float) -> Dict[str, Any]:
+    def _get_directions(self, origin_lat: float, origin_lng: float, dest_lat: float = None, dest_lng: float = None) -> Dict[str, Any]:
         """Get directions using OSRM (free routing)"""
+        # Use provided coordinates or fall back to instance defaults
+        if dest_lat is None:
+            dest_lat = self.destination_lat
+        if dest_lng is None:
+            dest_lng = self.destination_lng
+            
         try:
-            url = f"http://router.project-osrm.org/route/v1/walking/{origin_lng},{origin_lat};{self.destination_lng},{self.destination_lat}"
+            url = f"http://router.project-osrm.org/route/v1/walking/{origin_lng},{origin_lat};{dest_lng},{dest_lat}"
             params = {"overview": "false", "steps": "true"}
             
             resp = requests.get(url, params=params, timeout=10)
@@ -220,7 +253,7 @@ class DeliveryGuidanceService:
             data = resp.json()
             
             if data.get("code") != "Ok":
-                return self._simple_directions(origin_lat, origin_lng)
+                return self._simple_directions(origin_lat, origin_lng, dest_lat, dest_lng)
             
             route = data["routes"][0]
             duration = route.get("duration", 0)
@@ -244,11 +277,17 @@ class DeliveryGuidanceService:
             
         except Exception as e:
             print(f"[OSRM] Error: {e}")
-            return self._simple_directions(origin_lat, origin_lng)
+            return self._simple_directions(origin_lat, origin_lng, dest_lat, dest_lng)
     
-    def _simple_directions(self, origin_lat: float, origin_lng: float) -> Dict[str, Any]:
+    def _simple_directions(self, origin_lat: float, origin_lng: float, dest_lat: float = None, dest_lng: float = None) -> Dict[str, Any]:
         """Simple fallback directions"""
-        distance = self._calc_distance(origin_lat, origin_lng)
+        # Use provided coordinates or fall back to instance defaults
+        if dest_lat is None:
+            dest_lat = self.destination_lat
+        if dest_lng is None:
+            dest_lng = self.destination_lng
+            
+        distance = self._calc_distance(origin_lat, origin_lng, dest_lat, dest_lng)
         time_min = distance / 5 * 60  # Assume 5 km/h walking
         
         return {
@@ -267,12 +306,25 @@ class DeliveryGuidanceService:
                 cleaned = cleaned[len(phrase):].strip()
         return cleaned.rstrip('.?!')
     
-    def _calc_distance(self, lat: float, lng: float) -> float:
-        """Calculate distance using Haversine"""
+    def _calc_distance(self, lat: float, lng: float, dest_lat: float = None, dest_lng: float = None) -> float:
+        """Calculate distance using Haversine formula
+        
+        Args:
+            lat: Latitude of point to measure from
+            lng: Longitude of point to measure from
+            dest_lat: Destination latitude (uses instance default if not provided)
+            dest_lng: Destination longitude (uses instance default if not provided)
+        """
         from math import radians, sin, cos, sqrt, atan2
         
+        # Use provided coordinates or fall back to instance defaults
+        if dest_lat is None:
+            dest_lat = self.destination_lat
+        if dest_lng is None:
+            dest_lng = self.destination_lng
+        
         R = 6371
-        lat1, lng1, lat2, lng2 = map(radians, [self.destination_lat, self.destination_lng, lat, lng])
+        lat1, lng1, lat2, lng2 = map(radians, [dest_lat, dest_lng, lat, lng])
         dlat = lat2 - lat1
         dlng = lng2 - lng1
         

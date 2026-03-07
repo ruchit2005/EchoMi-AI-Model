@@ -20,11 +20,14 @@ class ConversationHandler:
         self.otp_service = self.service_factory.otp_service
         self.notification_service = self.service_factory.notification_service
         
-        # Initialize delivery guidance service
+        # Initialize delivery guidance service (will use dynamic coordinates)
         self.delivery_guide = DeliveryGuidanceService(config)
         
         # ORDER_WALLET equivalent - stores pending orders
         self.order_wallet = {}
+        
+        # Store current delivery location (updated per call)
+        self.current_delivery_location = None
     
     def identify_caller_role(self, message: str) -> str:
         """Identify if the caller is delivery person or unknown (matches original.py logic with fuzzy matching)"""
@@ -49,7 +52,7 @@ class ConversationHandler:
         # Otherwise, treat as unknown caller
         return 'unknown'
     
-    def handle_delivery_logic(self, message: str, stage: str, collected_info: Dict[str, Any], caller_id=None, response_language: str = "en") -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
+    def handle_delivery_logic(self, message: str, stage: str, collected_info: Dict[str, Any], caller_id=None, response_language: str = "en", delivery_location: Dict[str, Any] = None) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
         """
         Enhanced delivery logic with proper conversational flow matching original.py:
         1. "How may I assist?" 
@@ -61,6 +64,13 @@ class ConversationHandler:
         intent = detect_user_intent(message)
         action = {}
         templates = get_response_templates(response_language)
+        
+        # Update delivery location if provided (live coordinates from backend)
+        if delivery_location:
+            self.current_delivery_location = delivery_location
+            lat = delivery_location.get('latitude')
+            lng = delivery_location.get('longitude')
+            print(f"📍 [DELIVERY LOCATION] Using live coordinates: {lat}, {lng}")
         
         print(f"\n--- [DELIVERY LOGIC] START ---")
         print(f"--- [DELIVERY LOGIC] Stage: {stage}, Intent: {intent}, Language: {response_language} ---")
@@ -187,9 +197,18 @@ class ConversationHandler:
             print("--- [DELIVERY LOGIC] Processing current location for directions ---")
             
             # Use delivery guidance service to find them and guide them
+            # Pass live delivery location if available
+            destination_coords = None
+            if self.current_delivery_location:
+                destination_coords = (
+                    self.current_delivery_location.get('latitude'),
+                    self.current_delivery_location.get('longitude')
+                )
+            
             guidance_result = self.delivery_guide.guide_delivery_person(
                 landmark_description=message,
-                max_radius_km=1.0  # Search within 1km of destination
+                max_radius_km=1.0,  # Search within 1km of destination
+                destination_coords=destination_coords  # Use live coordinates
             )
             
             if guidance_result['success']:

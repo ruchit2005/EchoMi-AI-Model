@@ -109,6 +109,12 @@ def generate():
         firebase_uid = data.get("firebaseUid")
         caller_id = data.get("caller_id")
         
+        # Extract delivery location (NEW: Live coordinates from backend)
+        delivery_location = data.get("delivery_location")
+        if delivery_location:
+            collected_info['delivery_location'] = delivery_location
+            print(f"📍 [LOCATION] Received live coordinates: {delivery_location.get('latitude')}, {delivery_location.get('longitude')}")
+        
         if firebase_uid:
             collected_info['firebaseUid'] = firebase_uid
         
@@ -148,7 +154,7 @@ def generate():
             else:
                 # Use legacy format for non-OTP delivery conversations
                 response_text, new_stage, updated_info, action = conversation_handler.handle_delivery_logic(
-                    new_message, stage, collected_info, caller_id, response_language
+                    new_message, stage, collected_info, caller_id, response_language, delivery_location
                 )
                 
                 # Check if the action requires SMS integration
