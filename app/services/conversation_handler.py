@@ -27,18 +27,23 @@ class ConversationHandler:
         self.order_wallet = {}
     
     def identify_caller_role(self, message: str) -> str:
-        """Identify if the caller is delivery person or unknown (matches original.py logic)"""
+        """Identify if the caller is delivery person or unknown (matches original.py logic with fuzzy matching)"""
         message_lower = message.lower().strip()
         
-        # Check for delivery-related keywords
+        # Check for delivery-related keywords (exact matching)
         delivery_keywords = [
-            'delivery', 'parcel', 'package', 'amazon', 'flipkart', 
-            'swiggy', 'zomato', 'zepto', 'bluedart', 'myntra',
-            'courier', 'order', 'shipped'
+            'delivery', 'parcel', 'package', 'courier', 'order', 'shipped'
         ]
         
         # If the message contains delivery keywords, it's likely a delivery person
         if any(keyword in message_lower for keyword in delivery_keywords):
+            return 'delivery'
+        
+        # Try fuzzy matching for company names that might be misheard
+        from .utils.text_processing import fuzzy_match_company_name
+        fuzzy_result = fuzzy_match_company_name(message)
+        if fuzzy_result and fuzzy_result['confidence'] >= 0.65:
+            print(f"🎯 [CALLER ID] Identified as delivery person via fuzzy company match: {fuzzy_result['company']}")
             return 'delivery'
         
         # Otherwise, treat as unknown caller
@@ -907,21 +912,30 @@ class ConversationHandler:
         return "Thank you for calling. I'll make sure Ruchit gets your message. Have a great day!", "end_of_call", collected_info, action
     
     def extract_information_with_ai(self, message: str, collected_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract information using AI service"""
-        # Use the real OpenAI service's extraction method
+        """
+        Extract information using AI service with intelligent company name correction.
+        
+        The AI is trained to recognize and correct misheard company names from audio transcription:
+        - "speaky" → Swiggy
+        - "zoomato" → Zomato  
+        - "amazen" → Amazon
+        - etc.
+        
+        Falls back to fuzzy matching when OpenAI is unavailable.
+        """
+        # Use the real OpenAI service's extraction method (AI intelligently corrects mishearings)
         if hasattr(self.openai_service, 'extract_information_with_ai'):
             return self.openai_service.extract_information_with_ai(message, collected_info)
         
-        # Fallback to simple extraction
+        # Fallback to simple extraction with fuzzy matching when AI is unavailable
         extracted = {}
         message_lower = message.lower()
         
-        # Extract company names
-        companies = ['amazon', 'flipkart', 'swiggy', 'zomato', 'dunzo', 'zepto', 'bluedart']
-        for company in companies:
-            if company in message_lower:
-                extracted["company"] = company.title()
-                break
+        # Extract company names with fuzzy matching for misheard words
+        from ..utils.text_processing import extract_company_with_fuzzy_matching
+        company = extract_company_with_fuzzy_matching(message)
+        if company:
+            extracted["company"] = company
         
         # Extract phone numbers
         from ..utils.text_processing import extract_phone_number

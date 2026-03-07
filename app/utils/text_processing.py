@@ -1,8 +1,26 @@
-"""Text processing utilities for conversation handling (matches original.py flow)"""
+"""Text processing utilities for conversation handling (matches original.py flow)
+
+COMPANY NAME CORRECTION STRATEGY:
+----------------------------------
+This module uses a two-tier approach for correcting misheard company names:
+
+1. PRIMARY: AI-powered correction (when OpenAI is available)
+   - The AI is prompted to intelligently recognize and correct mishearings
+   - Uses contextual understanding and language model knowledge
+   - No hardcoded list needed - AI learns from examples in the prompt
+
+2. FALLBACK: Fuzzy matching (when OpenAI is unavailable)
+   - Uses character similarity and phonetic matching
+   - Has a curated list of common delivery companies and variations
+   - Ensures the system works even without API access
+
+The fuzzy matching functions below serve as a reliable fallback mechanism.
+"""
 
 import re
 import string
-from typing import List, Optional, Dict, Any
+from difflib import SequenceMatcher
+from typing import List, Optional, Dict, Any, Tuple
 
 def clean_location_text(raw_text: str) -> str:
     """Removes filler words from a spoken location for better geocoding (matches original)"""
@@ -83,7 +101,7 @@ def format_otp_for_speech(otp: str) -> str:
     return " ".join(clean_otp)
 
 def detect_user_intent(message: str) -> str:
-    """Enhanced intent detection with better OTP recognition (matches original.py exactly)"""
+    """Enhanced intent detection with better OTP recognition and fuzzy company matching"""
     message_lower = message.lower().strip()
     message_cleaned = re.sub(r'[.!?]', '', message_lower)
     
@@ -99,17 +117,35 @@ def detect_user_intent(message: str) -> str:
     if any(pattern in message_lower for pattern in otp_patterns):
         return "requesting_otp"
     
-    # Check for company + OTP context (enhanced with Hindi support)
+    # Check for company + OTP context (enhanced with fuzzy matching)
     company_keywords = ['amazon', 'flipkart', 'myntra', 'zomato', 'swiggy', 'delivery','zepto','bluedart', 'का', 'से']
-    if (any(company in message_lower for company in company_keywords) and 
+    has_company_keyword = any(company in message_lower for company in company_keywords)
+    
+    # Also check with fuzzy matching
+    if not has_company_keyword:
+        fuzzy_result = fuzzy_match_company_name(message)
+        has_company_keyword = fuzzy_result is not None
+    
+    if (has_company_keyword and 
         any(otp in message_lower for otp in ['code', 'otp', 'pin', 'चाहिए', 'कोड'])):
         return "requesting_otp"
     
     # Rest of existing intent detection logic (matching original exactly)
     if any(k in message_lower for k in ["road", "nagar", "colony", "market", "station", "gate", "circle", "apartment", "complex", "mall", "near", "opposite", "metro", "bus stop"]): 
         return "providing_location"
-    if any(k in message_lower for k in ["delivery", "parcel", "package", "amazon", "flipkart","swiggy", "zomato","zepto"]): 
+    
+    # Enhanced delivery detection with fuzzy company matching
+    delivery_keywords = ["delivery", "parcel", "package", "amazon", "flipkart","swiggy", "zomato","zepto"]
+    has_delivery_keyword = any(k in message_lower for k in delivery_keywords)
+    
+    # Also check with fuzzy company matching
+    if not has_delivery_keyword:
+        fuzzy_result = fuzzy_match_company_name(message)
+        has_delivery_keyword = fuzzy_result is not None
+    
+    if has_delivery_keyword:
         return "initial_delivery"
+    
     if any(k in message_lower for k in ["it's fine", "it's ok", 'ask him to call', 'just call me back']): 
         return "non_urgent_callback"
     if any(k in message_lower for k in ['same number', 'this number', "number i'm calling from"]): 
@@ -216,6 +252,164 @@ def extract_company_names(text: str) -> List[str]:
                 found_companies.append(company.title())
     
     return list(set(found_companies))  # Remove duplicates
+
+def fuzzy_match_company_name(text: str, threshold: float = 0.65) -> Optional[Dict[str, Any]]:
+    """
+    FALLBACK METHOD: Intelligently match misheard/misspelled company names using fuzzy matching.
+    
+    This is used as a fallback when OpenAI API is unavailable. When OpenAI is available,
+    the AI intelligently corrects company names without needing hardcoded variations.
+    
+    Examples:
+    - "speaky" → "Swiggy"
+    - "zoomato" → "Zomato" 
+    - "amazen" → "Amazon"
+    - "flipcart" → "Flipkart"
+    - "stick see" → "DTDC"
+    
+    Args:
+        text: The potentially misheard text
+        threshold: Minimum similarity score (0-1) to consider a match
+        
+    Returns:
+        Dict with 'company' (corrected name) and 'confidence' (0-1), or None if no match
+    """
+    # Known delivery companies with common variations and phonetic alternatives
+    DELIVERY_COMPANIES = {
+        'Swiggy': ['swiggy', 'swiggi', 'sweegy', 'swigy', 'speaky', 'speegy', 'sweegy', 'sweeji'],
+        'Zomato': ['zomato', 'zomatto', 'zoomat', 'zometo', 'zoomato', 'zomado'],
+        'Amazon': ['amazon', 'amazone', 'amazan', 'amazen', 'amzon', 'amzn'],
+        'Flipkart': ['flipkart', 'flipcart', 'flipkat', 'flipcard', 'flikart', 'flipkart'],
+        'Dunzo': ['dunzo', 'danzo', 'dunjo', 'denzo'],
+        'Zepto': ['zepto', 'zepto', 'zepto', 'zipto', 'zept'],
+        'BlueDart': ['bluedart', 'blue dart', 'bludart', 'bloedart', 'bluedart'],
+        'DTDC': ['dtdc', 'dtic', 'dtc', 'stick see', 'sticksee', 'didi see'],
+        'Myntra': ['myntra', 'mintra', 'myntera', 'maintra'],
+        'BigBasket': ['bigbasket', 'big basket', 'bigbasket', 'bigbasket', 'big besket'],
+        'Blinkit': ['blinkit', 'blink it', 'blinket', 'blinkit'],
+        'Uber Eats': ['uber eats', 'ubereats', 'uber eat', 'ubar eats'],
+        'Grofers': ['grofers', 'grofers', 'groffers', 'grofers'],
+        'InstaCart': ['instacart', 'insta cart', 'instakart'],
+        'FedEx': ['fedex', 'fed ex', 'fedx', 'fidex'],
+        'DHL': ['dhl', 'dhel', 'deehl'],
+        'India Post': ['india post', 'indian post', 'indiapost'],
+        'Delhivery': ['delhivery', 'delivery', 'delhiveri'],
+        'Porter': ['porter', 'portar'],
+        'Shadowfax': ['shadowfax', 'shadow fax', 'shadofax'],
+        'Shiprocket': ['shiprocket', 'ship rocket', 'shiproket'],
+        'Ekart': ['ekart', 'e cart', 'eekart', 'eekat']
+    }
+    
+    if not text:
+        return None
+    
+    text_lower = text.lower().strip()
+    words = text_lower.split()
+    
+    best_match = None
+    best_score = 0.0
+    
+    # Try to match the full text and individual words
+    search_terms = [text_lower] + words
+    
+    for official_name, variations in DELIVERY_COMPANIES.items():
+        for search_term in search_terms:
+            # Skip very short words (likely not company names)
+            if len(search_term) < 3:
+                continue
+                
+            # Check exact matches in variations first
+            if search_term in variations:
+                return {
+                    'company': official_name,
+                    'confidence': 1.0,
+                    'original_text': text
+                }
+            
+            # Calculate fuzzy similarity with each variation
+            for variation in variations:
+                # Use SequenceMatcher for character-level similarity
+                similarity = SequenceMatcher(None, search_term, variation).ratio()
+                
+                # Also check phonetic similarity (simplified)
+                phonetic_score = _calculate_phonetic_similarity(search_term, variation)
+                
+                # Combine scores (weighted average)
+                combined_score = (similarity * 0.7) + (phonetic_score * 0.3)
+                
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_match = official_name
+    
+    # Return match if above threshold
+    if best_score >= threshold:
+        return {
+            'company': best_match,
+            'confidence': round(best_score, 2),
+            'original_text': text
+        }
+    
+    return None
+
+def _calculate_phonetic_similarity(word1: str, word2: str) -> float:
+    """
+    Calculate phonetic similarity between two words.
+    Focuses on consonants and common sound patterns.
+    """
+    if not word1 or not word2:
+        return 0.0
+    
+    # Extract consonant patterns (vowels can be misheard more easily)
+    def get_consonants(word: str) -> str:
+        return ''.join([c for c in word.lower() if c not in 'aeiou'])
+    
+    consonants1 = get_consonants(word1)
+    consonants2 = get_consonants(word2)
+    
+    if not consonants1 or not consonants2:
+        return 0.0
+    
+    # Calculate similarity of consonant patterns
+    similarity = SequenceMatcher(None, consonants1, consonants2).ratio()
+    
+    # Bonus for matching first letter (usually preserved in mishearings)
+    if word1[0] == word2[0]:
+        similarity += 0.15
+    
+    # Bonus for similar length
+    length_diff = abs(len(word1) - len(word2))
+    if length_diff <= 2:
+        similarity += 0.1
+    
+    return min(similarity, 1.0)  # Cap at 1.0
+
+def extract_company_with_fuzzy_matching(text: str, threshold: float = 0.65) -> Optional[str]:
+    """
+    Extract company name from text using both exact matching and fuzzy matching.
+    This is the main function to use for company extraction with error correction.
+    
+    Args:
+        text: The input text (potentially with misheard company names)
+        threshold: Minimum confidence threshold for fuzzy matching
+        
+    Returns:
+        Corrected company name or None
+    """
+    if not text:
+        return None
+    
+    # First try exact extraction
+    exact_companies = extract_company_names(text)
+    if exact_companies:
+        return exact_companies[0]
+    
+    # Try fuzzy matching
+    fuzzy_result = fuzzy_match_company_name(text, threshold)
+    if fuzzy_result:
+        print(f"✨ [FUZZY MATCH] Corrected '{fuzzy_result['original_text']}' -> '{fuzzy_result['company']}' (confidence: {fuzzy_result['confidence']})")
+        return fuzzy_result['company']
+    
+    return None
 
 # Legacy functions for compatibility
 def clean_text_input(text: str) -> str:

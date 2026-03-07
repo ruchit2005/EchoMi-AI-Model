@@ -31,7 +31,7 @@ class RealOpenAIService:
             print("⚠️ OpenAI API key not configured. Using fallback mode.")
     
     def extract_information_with_ai(self, message: str, collected_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Enhanced information extraction with better prompting for delivery companies (matches original.py)"""
+        """AI-powered extraction with intelligent company name correction for misheard audio"""
         if not self.client:
             # Fallback to simple extraction if no API key
             return self._fallback_extraction(message, collected_info)
@@ -40,24 +40,35 @@ class RealOpenAIService:
         print(f"--- [INFO EXTRACTION] Message: '{message}' ---")
         
         try:
-            system_prompt = """You are an expert information extraction assistant for phone calls. 
+            system_prompt = """You are an expert at understanding phone conversations with delivery personnel, even when audio transcription is imperfect.
 
-Extract these fields from the user's message:
+CONTEXT: Audio transcription systems often mishear company names. Your job is to intelligently identify and CORRECT these errors.
+
+Common mishearings you should recognize and fix:
+- "speaky", "sweegy", "sweeji" → Swiggy
+- "zoomato", "zometto" → Zomato  
+- "amazen", "amazone", "amzon" → Amazon
+- "flipcart", "flipcard" → Flipkart
+- "stick see", "dtic" → DTDC
+- "uber eat" → Uber Eats
+- And ANY OTHER similar phonetic errors for delivery/courier companies
+
+Extract these fields:
 - "name": Person's name (if mentioned)
-- "purpose": Reason for calling (if mentioned) 
-- "phone": Phone number (if mentioned)
-- "company": Company name (especially for deliveries - Amazon, Flipkart, Swiggy, Zomato, etc.)
+- "purpose": Reason for calling (if mentioned)
+- "phone": Phone number (if mentioned)  
+- "company": The CORRECTED company name (use your intelligence to fix mishearings)
 
-IMPORTANT RULES:
-1. For delivery messages like "I have a delivery from Amazon", extract "company": "Amazon"
-2. For "delivery" without company, don't extract company
-3. Return ONLY a valid JSON object
-4. If no information is found, return {}
+CRITICAL: Use your knowledge of common Indian/global delivery companies (Swiggy, Zomato, Amazon, Flipkart, Dunzo, Zepto, BlueDart, DTDC, FedEx, DHL, Porter, BigBasket, Blinkit, Myntra, etc.) to intelligently interpret and correct misspellings or mishearings.
+
+Return ONLY valid JSON. If no information is found, return {}
 
 Examples:
-- "I have a delivery from Amazon" → {"company": "Amazon"}
-- "delivery for you" → {}
-- "This is John from Flipkart" → {"name": "John", "company": "Flipkart"}
+- "I have delivery from speaky" → {"company": "Swiggy"}
+- "delivery from amazen" → {"company": "Amazon"}
+- "This is from zoomato" → {"company": "Zomato"}
+- "flipcart parcel" → {"company": "Flipkart"}
+- "stick see courier" → {"company": "DTDC"}
 """
             
             user_prompt = f"Current information: {json.dumps(collected_info)}\nUser's message: \"{message}\""
@@ -97,16 +108,15 @@ Examples:
             return self._fallback_extraction(message, collected_info)
     
     def _fallback_extraction(self, message: str, collected_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Simple fallback extraction when OpenAI is not available"""
+        """Simple fallback extraction when OpenAI is not available - now with fuzzy matching"""
         extracted = {}
         message_lower = message.lower()
         
-        # Extract company names
-        companies = ['amazon', 'flipkart', 'swiggy', 'zomato', 'dunzo', 'zepto', 'bluedart']
-        for company in companies:
-            if company in message_lower:
-                extracted["company"] = company.title()
-                break
+        # Extract company names with fuzzy matching for misheard words
+        from ..utils.text_processing import extract_company_with_fuzzy_matching
+        company = extract_company_with_fuzzy_matching(message)
+        if company:
+            extracted["company"] = company
         
         # Extract names (simple pattern matching)
         if any(phrase in message_lower for phrase in ["my name is", "i am", "this is"]):
