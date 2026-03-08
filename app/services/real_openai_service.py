@@ -54,21 +54,23 @@ Common mishearings you should recognize and fix:
 - And ANY OTHER similar phonetic errors for delivery/courier companies
 
 Extract these fields:
-- "name": Person's name (if mentioned)
+- "name": ONLY the person's actual name (extract from "My name is X", "I am X", "This is X")
 - "purpose": Reason for calling (if mentioned)
 - "phone": Phone number (if mentioned)  
 - "company": The CORRECTED company name (use your intelligence to fix mishearings)
 
-CRITICAL: Use your knowledge of common Indian/global delivery companies (Swiggy, Zomato, Amazon, Flipkart, Dunzo, Zepto, BlueDart, DTDC, FedEx, DHL, Porter, BigBasket, Blinkit, Myntra, etc.) to intelligently interpret and correct misspellings or mishearings.
-
-Return ONLY valid JSON. If no information is found, return {}
+CRITICAL RULES:
+1. For names: Extract ONLY the actual name, NOT the phrase "my name is" or "I am"
+2. Use your knowledge of common Indian/global delivery companies to correct misspellings
+3. Return ONLY valid JSON
 
 Examples:
+- "My name is Ruchit" → {"name": "Ruchit"}
+- "I am John calling" → {"name": "John"}
+- "This is Priya" → {"name": "Priya"}
 - "I have delivery from speaky" → {"company": "Swiggy"}
 - "delivery from amazen" → {"company": "Amazon"}
-- "This is from zoomato" → {"company": "Zomato"}
-- "flipcart parcel" → {"company": "Flipkart"}
-- "stick see courier" → {"company": "DTDC"}
+- "My name is राज from zoomato" → {"name": "राज", "company": "Zomato"}
 """
             
             user_prompt = f"Current information: {json.dumps(collected_info)}\nUser's message: \"{message}\""
@@ -86,6 +88,15 @@ Examples:
             
             extracted = json.loads(response.choices[0].message.content.strip())
             print(f"✅ [INFO EXTRACTION] Extracted: {extracted}")
+            
+            # Clean and format extracted name (in case AI didn't follow instructions perfectly)
+            if extracted.get("name"):
+                import re
+                name = extracted["name"]
+                # Remove common prefixes if they somehow got included
+                name = re.sub(r'^(my name is|i am|this is|i\'m)\s+', '', name, flags=re.IGNORECASE).strip()
+                # Capitalize properly
+                extracted["name"] = name.title()
             
             # Format phone number if found
             if extracted.get("phone"):
@@ -118,15 +129,26 @@ Examples:
         if company:
             extracted["company"] = company
         
-        # Extract names (simple pattern matching)
-        if any(phrase in message_lower for phrase in ["my name is", "i am", "this is"]):
-            words = message.split()
-            for i, word in enumerate(words):
-                if word.lower() in ["is", "am"] and i + 1 < len(words):
-                    potential_name = words[i + 1].strip()
-                    if potential_name.isalpha() and len(potential_name) > 1:
-                        extracted["name"] = potential_name.title()
-                        break
+        # Extract names (improved pattern matching)
+        import re
+        
+        # Pattern 1: "My name is X" or "my name is X"
+        name_patterns = [
+            r'my name is\s+([a-zA-Z\u0900-\u097F]+)',  # Includes Hindi characters
+            r'i am\s+([a-zA-Z\u0900-\u097F]+)',
+            r'this is\s+([a-zA-Z\u0900-\u097F]+)',
+            r'i\'m\s+([a-zA-Z\u0900-\u097F]+)',
+        ]
+        
+        for pattern in name_patterns:
+            match = re.search(pattern, message_lower, re.IGNORECASE)
+            if match:
+                potential_name = match.group(1).strip()
+                # Capitalize properly (handles both English and Hindi)
+                if potential_name.isalpha() and len(potential_name) > 1:
+                    extracted["name"] = potential_name.title()
+                    print(f"✅ [FALLBACK] Extracted name: {extracted['name']}")
+                    break
         
         return extracted
     

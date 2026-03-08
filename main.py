@@ -155,8 +155,12 @@ if __name__ == '__main__':
     print(f"📱 Node.js Backend: {config.NODEJS_BACKEND_URL}")
     print(f"🔐 Notification System: {'✅' if config.INTERNAL_API_KEY and config.OWNER_PHONE_NUMBER else '❌'}")
     
+    # Use PORT from environment (for Render/Railway) or default to 5000
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🌐 Running on port: {port}")
+    
     app.run(
         host='0.0.0.0',
-        port=5000,
+        port=port,
         debug=config.DEBUG
     )

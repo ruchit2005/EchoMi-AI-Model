@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: echomi-ai-model
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: PORT
+        generateValue: true
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MAPBOX_API_KEY
+        sync: false
+      - key: BASE_URL
+        sync: false
+      - key: NODEJS_BACKEND_URL
+        sync: false
+      - key: OWNER_PHONE_NUMBER
+        sync: false
+      - key: APP_SECRET_KEY
+        sync: false
+      - key: INTERNAL_API_KEY
+        sync: false
+      - key: USER_LAT
+        sync: false
+      - key: USER_LNG
+        sync: false
+    healthCheckPath: /health

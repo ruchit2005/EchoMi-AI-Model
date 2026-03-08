@@ -43,7 +43,7 @@ class ConversationHandler:
             return 'delivery'
         
         # Try fuzzy matching for company names that might be misheard
-        from .utils.text_processing import fuzzy_match_company_name
+        from ..utils.text_processing import fuzzy_match_company_name
         fuzzy_result = fuzzy_match_company_name(message)
         if fuzzy_result and fuzzy_result['confidence'] >= 0.65:
             print(f"🎯 [CALLER ID] Identified as delivery person via fuzzy company match: {fuzzy_result['company']}")
